@@ -6,9 +6,12 @@ def createTable():
     c = conn.cursor()
     print('Connection Secured')
 
+    # Add an entry_id as the PRIMARY KEY for multiple records per user
     c.execute('''CREATE TABLE IF NOT EXISTS attendance
-              (id INTEGER, name TEXT, date TEXT)
-              ''')
+                 (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  id INTEGER, 
+                  name TEXT, 
+                  date TEXT)''')
     
     conn.commit()
     conn.close()
