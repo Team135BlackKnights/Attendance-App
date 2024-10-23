@@ -11,7 +11,8 @@ def createTable():
                  (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   id INTEGER, 
                   name TEXT, 
-                  date TEXT)''')
+                  date TEXT
+              )''')
     
     conn.commit()
     conn.close()
@@ -42,6 +43,7 @@ def writeDate(currentId, currentDate):
     conn.commit()
     conn.close()
 
+
 def getId(id):
     conn = sql.connect('data.db')
     c = conn.cursor()
@@ -68,6 +70,3 @@ def getDate(id):
     result = c.fetchone()
     c.close()
     return result[0] if result else None
-
-
-

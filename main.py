@@ -1,6 +1,8 @@
 from databaseMain import *
+from camera import *
 from datetime import datetime
 import time
+import os
 
 # Ensure the table is created
 createTable()
@@ -20,13 +22,11 @@ while True:
 
 # Check if the ID already exists in any previous entry
 name = getName(id)  # Try to fetch the name associated with this ID
-print(name)
 # If the name doesn't exist, ask for it
 if name is None:
-    print(name)
-    name = input("Give your name: ")
+    name = input("What's your name?: ")
     writeName(id, name)  # This stores the ID the first time
-
+print(f"Hello {name}")
 # Get current date and time
 now = datetime.now()
 
@@ -34,8 +34,17 @@ now = datetime.now()
 formatted_time = now.strftime("%I:%M %p")  # %I for 12-hour format, %M for minutes, %p for AM/PM
 formatted_date = now.strftime("%Y-%m-%d") 
 
-fullDate = f"Time out: {formatted_time}, Date out: {formatted_date}"
+fullDate = f"Time scanned: {formatted_time}, Date scanned: {formatted_date}"
+
 print(fullDate)
+
+#Record a picture
+fileDate = now.strftime("%I-%M-%p-%Y-%m-%d")
+print("Smile! Look into the green light.")
+if not os.path.isdir(f"images//{id}-{name}"):
+    os.makedirs(f"images//{id}-{name}")
+pic = takePic((name + "__" + fileDate), f"{id}-{name}")
+print(pic)
 
 # Insert a new entry with the current date and name
 conn = sql.connect('data.db')
