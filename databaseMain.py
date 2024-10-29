@@ -11,7 +11,8 @@ def createTable():
                  (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   id INTEGER, 
                   name TEXT, 
-                  date TEXT
+                  date TEXT,
+                  reason TEXT
               )''')
     
     conn.commit()
@@ -34,14 +35,14 @@ def writeName(currentId, currentName):
     conn.commit()
     conn.close()
 
-def writeDate(currentId, currentDate):
+def writeData(currentId, currentName, currentDate, currentReason):
     conn = sql.connect('data.db')
     c = conn.cursor()
-
-    c.execute('UPDATE attendance SET date = (?) WHERE id = (?) ', (currentDate, currentId,))
-    
+    c.execute('INSERT INTO attendance (id, name, date, reason) VALUES (?, ?, ?, ?)',
+              (currentId, currentName, currentDate, currentReason))
     conn.commit()
     conn.close()
+
 
 
 def getId(id):

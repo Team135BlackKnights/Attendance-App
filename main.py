@@ -5,6 +5,8 @@ import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar
 from databaseMain import *
 from camera import takePic
+from oauth2client.service_account import ServiceAccountCredentials
+import gspread
 
 # Ensure the table is created
 createTable()
@@ -16,6 +18,14 @@ def center_window(window, width=500, height=400):
     x = (screen_width // 2) - (width // 2)
     y = (screen_height // 2) - (height // 2)
     window.geometry(f"{width}x{height}+{x}+{y}")
+
+# Setup Google Sheets API
+def setup_google_sheet():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_name('C:/Users/aqazi075/Downloads/robotics-barcode-77e5db7238b4.json', scope)
+    client = gspread.authorize(creds)
+    sheet = client.open("Barcode Sheet").sheet1  # Change this to your sheet's name
+    return sheet
 
 # Function to handle scanning the ID
 def scan_id(event=None):
@@ -100,7 +110,7 @@ def take_picture_and_record(window, current_id, name):
     file_date = now.strftime("%I-%M-%p-%Y-%m-%d")
     takePic(f"{name}__{file_date}", f"{current_id}-{name}")
 
-    # Record attendance
+    # Record attendance and push to Google Sheets
     process_attendance(current_id, name)
 
 # Function to process attendance
@@ -111,18 +121,59 @@ def process_attendance(current_id, name):
 
     # Get sign-in or sign-out action
     action = action_var.get()
+
+    # Check if the action is sign-out and the time is before 6:45 PM
+    reason = None
+    if action == "out":
+        if now.hour < 18 or (now.hour == 18 and now.minute < 45):
+            reason = ask_reason_window()  # Ask for reason
+            if reason is None:
+                return  # If no reason is provided, stop processing
+        else:
+            reason = None
+
     full_date = f"Signed {action} at: {formatted_time}, Date: {formatted_date}"
 
     # Store the attendance in the database
-    conn = sql.connect('data.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO attendance (id, name, date) VALUES (?, ?, ?)',
-              (current_id, name, full_date))
-    conn.commit()
-    conn.close()
+    writeData(current_id, name, full_date, reason)
+
+    # Push data to Google Sheets
+    push_to_google_sheets(current_id, name, full_date, reason)
 
     # Confirm attendance recording
-    messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}")
+    messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}")
+
+def push_to_google_sheets(current_id, name, attendance_record, reason):
+    """Push attendance data to Google Sheets."""
+    sheet = setup_google_sheet()
+    sheet.append_row([current_id, name, attendance_record, reason])  # Append a new row with the data
+
+def ask_reason_window():
+    reason_window = Toplevel(root)
+    reason_window.title("Reason for Early Sign-Out")
+    center_window(reason_window, width=300, height=150)
+
+    Label(reason_window, text="Enter reason for early sign-out:").pack(pady=10)
+    reason_entry = Entry(reason_window)
+    reason_entry.pack(pady=5)
+
+    reason = None  # Declare reason variable
+
+    def save_reason():
+        """Handles the Save Reason button press."""
+        nonlocal reason  # Use the nonlocal declaration to access the outer variable
+        reason = reason_entry.get()
+        if reason:
+            reason_window.destroy()
+        else:
+            messagebox.showerror("Error", "Reason cannot be empty.")
+
+    # Bind the Enter key to the save_reason function
+    reason_entry.bind("<Return>", lambda event: save_reason())
+
+    Button(reason_window, text="Submit", command=save_reason).pack(pady=10)
+    root.wait_window(reason_window)  # Wait until the window is closed
+    return reason  # Return the reason after the window is closed
 
 # Initialize the Tkinter window
 root = tk.Tk()
