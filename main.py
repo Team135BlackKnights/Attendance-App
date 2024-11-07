@@ -5,8 +5,11 @@ import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar
 from databaseMain import *
 from camera import takePic
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
+import time
 
 # Ensure the table is created
 createTable()
@@ -27,15 +30,98 @@ def setup_google_sheet():
     sheet = client.open("Barcode Sheet").sheet1  # Change this to your sheet's name
     return sheet
 
+# Authenticate Google Drive API
+def setup_google_drive():
+    scope = ['https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_name('C:/Users/aqazi075/Downloads/robotics-barcode-77e5db7238b4.json', scope)
+    drive_service = build('drive', 'v3', credentials=creds)
+    return drive_service
+
+# Find or create the parent folder
+def get_or_create_parent_folder(drive_service, parent_folder_name):
+    # Check if the parent folder exists
+    response = drive_service.files().list(
+        q=f"name='{parent_folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        fields='files(id, name)'
+    ).execute()
+
+    if len(response['files']) > 0:
+        # Parent folder exists
+        return response['files'][0]['id']
+    else:
+        # Create the parent folder
+        file_metadata = {
+            'name': parent_folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        folder = drive_service.files().create(body=file_metadata, fields='id').execute()
+        return folder.get('id')
+
+# Create a subfolder within an existing parent folder
+def create_subfolder_if_not_exists(drive_service, subfolder_name, parent_folder_id):
+    # Search for the subfolder by name within the parent folder
+    response = drive_service.files().list(
+        q=f"name='{subfolder_name}' and '{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        fields='files(id, name)'
+    ).execute()
+
+    if len(response['files']) > 0:
+        # Subfolder exists
+        return response['files'][0]['id']
+    else:
+        # Subfolder does not exist; create it
+        file_metadata = {
+            'name': subfolder_name,
+            'parents': [parent_folder_id],
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        subfolder = drive_service.files().create(body=file_metadata, fields='id').execute()
+        return subfolder.get('id')
+    
+# Set file permissions to make it publicly accessible
+def make_file_public(drive_service, file_id):
+    permission = {
+        'role': 'reader',
+        'type': 'anyone'
+    }
+    drive_service.permissions().create(
+        fileId=file_id,
+        body=permission
+    ).execute()
+
+# Upload an image to a specific folder and return its view link
+def upload_image_to_drive(drive_service, folder_id, file_path):
+    file_name = os.path.basename(file_path)
+    file_metadata = {
+        'name': file_name,
+        'parents': [folder_id]
+    }
+    media = MediaFileUpload(file_path, mimetype='image/jpeg')  # Adjust mimetype if needed
+
+    # Upload file
+    file = drive_service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields='id, webViewLink, webContentLink'
+    ).execute()
+
+    # Make the file public
+    make_file_public(drive_service, file.get('id'))
+
+    # Get the file's webViewLink to share
+    file_url = file.get('webViewLink')
+    print(f"File uploaded successfully. File URL: {file_url}")
+    return file_url
+
 # Function to handle scanning the ID
 def scan_id(event=None):
     """Handles the Scan ID button press or Enter key event."""
     try:
         current_id = int(id_entry.get())
         if len(str(current_id)) != 6 or current_id < 0:
-            raise ValueError("Bogus ID, too long/short")
+            raise ValueError("Invalid length")
     except ValueError as e:
-        messagebox.showerror("Error", f"Invalid ID: {str(e)}, AKA has letters")
+        messagebox.showerror("Error", f"Invalid ID: {str(e)}")
         return
 
     id_entry.delete(0, tk.END)  # Clear the ID entry box
@@ -60,6 +146,7 @@ def ask_name_window(current_id):
     def save_name(event=None):
         """Handles the Save Name button press or Enter key event."""
         name = name_entry.get()
+        name = name.capitalize()
         if name:
             writeName(current_id, name)
             new_window.destroy()
@@ -80,8 +167,8 @@ def open_smile_window(current_id, name):
     # Display the "Smile!" message immediately
     display_smile_message(smile_window)
 
-    # After 2 seconds, take a picture and process attendance
-    smile_window.after(2000, lambda: take_picture_and_record(smile_window, current_id, name))
+    # After half a second, take a picture and process attendance
+    smile_window.after(500, lambda: take_picture_and_record(smile_window, current_id, name))
 
 # Function to display a styled "Smile!" message
 def display_smile_message(window):
@@ -99,19 +186,26 @@ def display_smile_message(window):
 
 # Function to take a picture and record attendance
 def take_picture_and_record(window, current_id, name):
-    window.destroy()  # Close the smile window
+    
 
     # Take the picture
     now = datetime.now()
-    folder = f"images//{current_id}-{name}"
+    global folder
+    folder = f"images/{current_id}-{name}"
     if not os.path.isdir(folder):
         os.makedirs(folder)
 
     file_date = now.strftime("%I-%M-%p-%Y-%m-%d")
+    global picName
+    picName = f"{name}__{file_date}.jpeg"
     takePic(f"{name}__{file_date}", f"{current_id}-{name}")
+
+    window.destroy()  # Close the smile window
 
     # Record attendance and push to Google Sheets
     process_attendance(current_id, name)
+
+    
 
 # Function to process attendance
 def process_attendance(current_id, name):
@@ -138,15 +232,33 @@ def process_attendance(current_id, name):
     writeData(current_id, name, full_date, reason)
 
     # Push data to Google Sheets
-    push_to_google_sheets(current_id, name, full_date, reason)
+    push_to_google(current_id, name, full_date, reason)
 
     # Confirm attendance recording
     messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}")
 
-def push_to_google_sheets(current_id, name, attendance_record, reason):
-    """Push attendance data to Google Sheets."""
+def push_to_google(current_id, name, attendance_record, reason):
+    """Push attendance data to Google Sheets and put the images in a folder"""
+    
     sheet = setup_google_sheet()
-    sheet.append_row([current_id, name, attendance_record, reason])  # Append a new row with the data
+    drive = setup_google_drive()
+    
+     # Define parent folder, subfolder, and file to upload
+    parent_folder_name = "Attendance Images"  # Name of the existing or new parent folder
+    subfolder_name = f"{current_id}-{name}"  # Name of the subfolder to create within the parent folder
+    file_path = f"{folder}/{picName}"   # image file path
+    print(file_path)
+    
+     # Find or create the parent folder
+    parent_folder_id = get_or_create_parent_folder(drive, parent_folder_name)
+
+    # Create subfolder within the parent folder if it doesn't exist
+    subfolder_id = create_subfolder_if_not_exists(drive, subfolder_name, parent_folder_id)
+
+    # Upload image to the subfolder and get its URL
+    file_url = upload_image_to_drive(drive, subfolder_id, file_path)
+
+    sheet.append_row([current_id, name, attendance_record, folder, file_url, reason])  # Append a new row with the data
 
 def ask_reason_window():
     reason_window = Toplevel(root)
