@@ -1,4 +1,5 @@
 import os
+from PIL import ImageFont
 from datetime import datetime
 import sqlite3 as sql
 import tkinter as tk
@@ -8,6 +9,7 @@ from camera import takePic
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from oauth2client.service_account import ServiceAccountCredentials
+from tkinter import font
 import gspread
 import time
 
@@ -139,20 +141,27 @@ def ask_name_window(current_id):
     new_window.title("Enter Name")
     center_window(new_window, width=300, height=200)
 
-    Label(new_window, text="Enter your name:").pack(pady=10)
+    # Make the new window auto-focused
+    new_window.focus_force()
+
+    Label(new_window, text="Enter your first AND last name:").pack(pady=10)
     name_entry = Entry(new_window)
     name_entry.pack()
+
+    # Focus the entry field as soon as the window opens
+    name_entry.focus()
 
     def save_name(event=None):
         """Handles the Save Name button press or Enter key event."""
         name = name_entry.get()
         name = name.capitalize()
+        
         if name:
             writeName(current_id, name)
             new_window.destroy()
             open_smile_window(current_id, name)
         else:
-            messagebox.showerror("Error", "Name cannot be empty.")
+            messagebox.showerror("Error", "Name cannot be empty.", parent = new_window)
 
     # Bind the Enter key to the save_name function
     name_entry.bind("<Return>", save_name)
@@ -163,6 +172,9 @@ def open_smile_window(current_id, name):
     smile_window = Toplevel(root)
     smile_window.title("Smile!")
     center_window(smile_window, width=400, height=300)
+
+    # Make the smile window auto-focused
+    smile_window.focus_force()
 
     # Display the "Smile!" message immediately
     display_smile_message(smile_window)
@@ -220,11 +232,19 @@ def process_attendance(current_id, name):
     reason = None
     if action == "out":
         if now.hour < 18 or (now.hour == 18 and now.minute < 45):
-            reason = ask_reason_window()  # Ask for reason
+            reason = early_sign_out()  # Ask for reason
             if reason is None:
                 return  # If no reason is provided, stop processing
         else:
             reason = None
+    else:
+        if now.hour > 15 or (now.hour == 15 and now.minute > 45):
+            reason = late_sign_in()  # Ask for reason
+            if reason is None:
+                return  # If no reason is provided, stop processing
+        else:
+            reason = None
+            
 
     full_date = f"Signed {action} at: {formatted_time}, Date: {formatted_date}"
 
@@ -258,16 +278,22 @@ def push_to_google(current_id, name, attendance_record, reason):
     # Upload image to the subfolder and get its URL
     file_url = upload_image_to_drive(drive, subfolder_id, file_path)
 
-    sheet.append_row([current_id, name, attendance_record, folder, file_url, reason])  # Append a new row with the data
+    sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  # Append a new row with the data
 
-def ask_reason_window():
+def early_sign_out():
     reason_window = Toplevel(root)
     reason_window.title("Reason for Early Sign-Out")
     center_window(reason_window, width=300, height=150)
 
+    # Make the reason window auto-focused
+    reason_window.focus_force()
+
     Label(reason_window, text="Enter reason for early sign-out:").pack(pady=10)
     reason_entry = Entry(reason_window)
     reason_entry.pack(pady=5)
+
+    # Focus the entry field as soon as the window opens
+    reason_entry.focus()
 
     reason = None  # Declare reason variable
 
@@ -278,38 +304,90 @@ def ask_reason_window():
         if reason:
             reason_window.destroy()
         else:
-            messagebox.showerror("Error", "Reason cannot be empty.")
+            messagebox.showerror("Error", "Reason cannot be empty.", parent = reason_window)
+
 
     # Bind the Enter key to the save_reason function
     reason_entry.bind("<Return>", lambda event: save_reason())
 
     Button(reason_window, text="Submit", command=save_reason).pack(pady=10)
     root.wait_window(reason_window)  # Wait until the window is closed
+    reason = "Early sign out: " + reason
     return reason  # Return the reason after the window is closed
+
+def late_sign_in():
+    reason_window = Toplevel(root)
+    reason_window.title("Reason for Late Sign-In")
+    center_window(reason_window, width=300, height=150)
+
+    # Make the reason window auto-focused
+    reason_window.focus_force()
+
+    Label(reason_window, text="Enter reason for late sign-in:").pack(pady=10)
+    reason_entry = Entry(reason_window)
+    reason_entry.pack(pady=5)
+
+    # Focus the entry field as soon as the window opens
+    reason_entry.focus()
+
+    reason = None  # Declare reason variable
+
+    def save_reason():
+        """Handles the Save Reason button press."""
+        nonlocal reason  # Use the nonlocal declaration to access the outer variable
+        reason = reason_entry.get()
+        if reason:
+            reason_window.destroy()
+        else:
+            messagebox.showerror("Error", "Reason cannot be empty.", parent = reason_window)
+
+
+    # Bind the Enter key to the save_reason function
+    reason_entry.bind("<Return>", lambda event: save_reason())
+
+    Button(reason_window, text="Submit", command=save_reason).pack(pady=10)
+    root.wait_window(reason_window)  # Wait until the window is closed
+    reason = "Late Sign In: " + reason
+    return reason  # Return the reason after the window is closed
+
+
+
 
 # Initialize the Tkinter window
 root = tk.Tk()
 root.title("Attendance System")
 center_window(root)
 
+# Make the window fullscreen
+root.attributes("-fullscreen", True)
+# Exit fullscreen with the Escape key
+root.bind("<Escape>", lambda event: root.attributes("-fullscreen", False))
+
+# Make custom font, must be intalled on system lest it default to Ariel
+font_path = "Poppins-Regular"  
+tk_font_large = font.Font(family="Poppins", size=48)
+tk_font_medium = font.Font(family="Poppins", size=36)
+tk_font_smedium = font.Font(family="Poppins", size=28)
+tk_font_small = font.Font(family="Poppins", size=18)
+
 # Variable to hold the selected action (sign-in or sign-out)
 action_var = StringVar(value="in")  # Default to "in"
 
 # GUI Layout
-Label(root, text="Attendance System", font=("Arial", 24)).pack(pady=10)
+Label(root, text="Attendance System", font=tk_font_large).pack(pady=10)
 
-Label(root, text="Enter your ID:").pack(pady=5)
-id_entry = Entry(root, width=30)
+Label(root, text="Enter your ID:", font=tk_font_medium).pack(pady=5)
+id_entry = Entry(root, font=tk_font_medium)
 id_entry.pack(pady=5)
-id_entry.bind("<Return>", scan_id)  # Bind Enter key to scan_id function
+id_entry.bind("<Return>", lambda event: scan_id())  # Bind Enter key to scan_id function
 
 # Radio buttons for selecting sign-in or sign-out
-Label(root, text="Select Action:").pack(pady=5)
-Radiobutton(root, text="Sign In", variable=action_var, value="in").pack()
-Radiobutton(root, text="Sign Out", variable=action_var, value="out").pack()
+Label(root, text="Select Action:", font=tk_font_small).pack(pady=5)
+Radiobutton(root, text="Sign In", font=tk_font_smedium, variable=action_var, value="in").pack()
+Radiobutton(root, text="Sign Out", font=tk_font_smedium, variable=action_var, value="out").pack()
 
 # Scan ID Button
-Button(root, text="Scan ID", command=scan_id).pack(pady=10)
+Button(root, text="Scan ID", font=tk_font_smedium, command=lambda: scan_id()).pack(pady=10)
 
 # Start the Tkinter event loop
 root.mainloop()
