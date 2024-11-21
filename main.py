@@ -16,6 +16,9 @@ import time
 # Ensure the table is created
 createTable()
 
+#API File Path, Change this depending on your API file.
+APIPath = 'C:/Users/aqazi075/Downloads/robotics-barcode-77e5db7238b4.json'
+
 # Function to center any window on the screen
 def center_window(window, width=500, height=400):
     screen_width = window.winfo_screenwidth()
@@ -27,7 +30,7 @@ def center_window(window, width=500, height=400):
 # Setup Google Sheets API
 def setup_google_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name('C:/Users/aqazi075/Downloads/robotics-barcode-77e5db7238b4.json', scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
     client = gspread.authorize(creds)
     sheet = client.open("Barcode Sheet").sheet1  # Change this to your sheet's name
     return sheet
@@ -35,7 +38,7 @@ def setup_google_sheet():
 # Authenticate Google Drive API
 def setup_google_drive():
     scope = ['https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name('C:/Users/aqazi075/Downloads/robotics-barcode-77e5db7238b4.json', scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
     drive_service = build('drive', 'v3', credentials=creds)
     return drive_service
 

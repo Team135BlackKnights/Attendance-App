@@ -1,3 +1,5 @@
+# All functions related to the editing and creating of the SQLite database
+
 import sqlite3 as sql
 from datetime import datetime
 

@@ -1,3 +1,5 @@
+# Code for taking and saving a picture
+
 import cv2
 import time
 import os
@@ -55,3 +57,4 @@ def takePic(picname, folder):
 
     cap.release()
     cv2.destroyAllWindows()
+
