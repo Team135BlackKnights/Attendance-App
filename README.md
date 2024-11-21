@@ -12,5 +12,6 @@
 - Make sure the ID requirements apply to your ID system
 - Make sure the times for check in/out make sense
 - Make sure the google sheet it exports to is correct.
+- Make sure the "Poppins" Font is installed or change the font to something else, unless Ariel is fine.
 
 **If first installing this, please run the dependencies file to make sure the code has all required libraries**
