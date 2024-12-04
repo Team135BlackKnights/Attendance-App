@@ -3,7 +3,7 @@ from PIL import ImageFont
 from datetime import datetime
 import sqlite3 as sql
 import tkinter as tk
-from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar
+from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar, OptionMenu
 from databaseMain import *
 from camera import takePic
 from googleapiclient.discovery import build
@@ -228,25 +228,33 @@ def process_attendance(current_id, name):
     formatted_time = now.strftime("%I:%M %p")
     formatted_date = now.strftime("%Y-%m-%d")
 
-    # Get sign-in or sign-out action
+    # Get sign-in or sign-out 
     action = action_var.get()
+    # Get event
+    event = event_var.get()
 
-    # Check if the action is sign-out and the time is before 6:45 PM
+    # Checks what the event is, will put the event in the "Reason" collumn if not Internship
+    # If is Internship: Check if the action is performed at the correct time and if not, asks for a reason they are late/early
     reason = None
-    if action == "out":
-        if now.hour < 18 or (now.hour == 18 and now.minute < 45):
-            reason = early_sign_out()  # Ask for reason
-            if reason is None:
-                return  # If no reason is provided, stop processing
+    if event == "Internship":
+        if action == "out":
+            if now.hour < 18 or (now.hour == 18 and now.minute < 45):
+                reason = early_sign_out()  # Ask for reason
+                if reason is None:
+                    return  # If no reason is provided, stop processing
+            else:
+                reason = None
         else:
-            reason = None
-    else:
-        if now.hour > 15 or (now.hour == 15 and now.minute > 45):
-            reason = late_sign_in()  # Ask for reason
-            if reason is None:
-                return  # If no reason is provided, stop processing
-        else:
-            reason = None
+            if now.hour > 15 or (now.hour == 15 and now.minute > 45):
+                reason = late_sign_in()  # Ask for reason
+                if reason is None:
+                    return  # If no reason is provided, stop processing
+            else:
+                reason = None
+    elif event == "Volunteering":
+        reason = "Volunteering" 
+    elif event == "Build Season":
+        reason = "Build Season"
             
 
     full_date = f"Signed {action} at: {formatted_time}, Date: {formatted_date}"
@@ -375,6 +383,8 @@ tk_font_small = font.Font(family="Poppins", size=18)
 
 # Variable to hold the selected action (sign-in or sign-out)
 action_var = StringVar(value="in")  # Default to "in"
+# Variable to help the selected event (Internship, Volunteering, or Build Season)
+event_var = StringVar(value= "Internship") # Default to "Internship"
 
 # GUI Layout
 Label(root, text="Attendance System", font=tk_font_large).pack(pady=10)
@@ -383,6 +393,13 @@ Label(root, text="Enter your ID:", font=tk_font_medium).pack(pady=5)
 id_entry = Entry(root, font=tk_font_medium)
 id_entry.pack(pady=5)
 id_entry.bind("<Return>", lambda event: scan_id())  # Bind Enter key to scan_id function
+
+# Dropdown menu for specific event leading to being in the lab
+Label(root, text="Why are you here:", font=tk_font_small).pack(pady=5)
+eventsList = ["Internship", "Volunteering", "Build Season"]
+w = OptionMenu(root, event_var, *eventsList)
+w.config(font=tk_font_small)
+w.pack()
 
 # Radio buttons for selecting sign-in or sign-out
 Label(root, text="Select Action:", font=tk_font_small).pack(pady=5)

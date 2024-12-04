@@ -4,7 +4,7 @@ import cv2
 import time
 import os
 
-''' Theoretical version if I can make the folder secure
+''' Theoretical version to dump all pictures into a shared folder if I can make the folder secure
 def takePic(picname, folder):
     # Check if the folder path exists, and create it if it doesn’t
     directory = f"S:/Robotics/Attendance Images/{folder}"
@@ -45,8 +45,6 @@ def takePic(picname, folder):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    # Warm up the camera
-    time.sleep(2)
 
     ret, frame = cap.read()
     if ret:
