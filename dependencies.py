@@ -1,3 +1,5 @@
+# Script to install all needed dependencies 
+
 import subprocess
 import sys
 

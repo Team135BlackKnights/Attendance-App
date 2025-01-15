@@ -5,6 +5,7 @@ import sqlite3 as sql
 import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar, OptionMenu
 from databaseMain import *
+from driveUpload import *
 from camera import takePic
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -16,107 +17,6 @@ import time
 # Ensure the table is created
 createTable()
 
-#API File Path, Change this depending on your API file.
-APIPath = 'C:/Users/aqazi075/Downloads/robotics-barcode-77e5db7238b4.json'
-
-# Function to center any window on the screen
-def center_window(window, width=500, height=400):
-    screen_width = window.winfo_screenwidth()
-    screen_height = window.winfo_screenheight()
-    x = (screen_width // 2) - (width // 2)
-    y = (screen_height // 2) - (height // 2)
-    window.geometry(f"{width}x{height}+{x}+{y}")
-
-# Setup Google Sheets API
-def setup_google_sheet():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open("Barcode Sheet").sheet1  # Change this to your sheet's name
-    return sheet
-
-# Authenticate Google Drive API
-def setup_google_drive():
-    scope = ['https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
-    drive_service = build('drive', 'v3', credentials=creds)
-    return drive_service
-
-# Find or create the parent folder
-def get_or_create_parent_folder(drive_service, parent_folder_name):
-    # Check if the parent folder exists
-    response = drive_service.files().list(
-        q=f"name='{parent_folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields='files(id, name)'
-    ).execute()
-
-    if len(response['files']) > 0:
-        # Parent folder exists
-        return response['files'][0]['id']
-    else:
-        # Create the parent folder
-        file_metadata = {
-            'name': parent_folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        folder = drive_service.files().create(body=file_metadata, fields='id').execute()
-        return folder.get('id')
-
-# Create a subfolder within an existing parent folder
-def create_subfolder_if_not_exists(drive_service, subfolder_name, parent_folder_id):
-    # Search for the subfolder by name within the parent folder
-    response = drive_service.files().list(
-        q=f"name='{subfolder_name}' and '{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields='files(id, name)'
-    ).execute()
-
-    if len(response['files']) > 0:
-        # Subfolder exists
-        return response['files'][0]['id']
-    else:
-        # Subfolder does not exist; create it
-        file_metadata = {
-            'name': subfolder_name,
-            'parents': [parent_folder_id],
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        subfolder = drive_service.files().create(body=file_metadata, fields='id').execute()
-        return subfolder.get('id')
-    
-# Set file permissions to make it publicly accessible
-def make_file_public(drive_service, file_id):
-    permission = {
-        'role': 'reader',
-        'type': 'anyone'
-    }
-    drive_service.permissions().create(
-        fileId=file_id,
-        body=permission
-    ).execute()
-
-# Upload an image to a specific folder and return its view link
-def upload_image_to_drive(drive_service, folder_id, file_path):
-    file_name = os.path.basename(file_path)
-    file_metadata = {
-        'name': file_name,
-        'parents': [folder_id]
-    }
-    media = MediaFileUpload(file_path, mimetype='image/jpeg')  # Adjust mimetype if needed
-
-    # Upload file
-    file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id, webViewLink, webContentLink'
-    ).execute()
-
-    # Make the file public
-    make_file_public(drive_service, file.get('id'))
-
-    # Get the file's webViewLink to share
-    file_url = file.get('webViewLink')
-    print(f"File uploaded successfully. File URL: {file_url}")
-    return file_url
 
 # Function to handle scanning the ID
 def scan_id(event=None):
@@ -240,15 +140,11 @@ def process_attendance(current_id, name):
         if action == "out":
             if now.hour < 18 or (now.hour == 18 and now.minute < 45):
                 reason = early_sign_out()  # Ask for reason
-                if reason is None:
-                    return  # If no reason is provided, stop processing
             else:
                 reason = None
         else:
             if now.hour > 15 or (now.hour == 15 and now.minute > 45):
                 reason = late_sign_in()  # Ask for reason
-                if reason is None:
-                    return  # If no reason is provided, stop processing
             else:
                 reason = None
     elif event == "Volunteering":
@@ -269,27 +165,20 @@ def process_attendance(current_id, name):
     messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}")
 
 def push_to_google(current_id, name, attendance_record, reason):
-    """Push attendance data to Google Sheets and put the images in a folder"""
+        """Push attendance data to Google Sheets and put the images in a folder"""
     
-    sheet = setup_google_sheet()
-    drive = setup_google_drive()
-    
-     # Define parent folder, subfolder, and file to upload
-    parent_folder_name = "Attendance Images"  # Name of the existing or new parent folder
-    subfolder_name = f"{current_id}-{name}"  # Name of the subfolder to create within the parent folder
-    file_path = f"{folder}/{picName}"   # image file path
-    print(file_path)
-    
-     # Find or create the parent folder
-    parent_folder_id = get_or_create_parent_folder(drive, parent_folder_name)
+        sheet = setup_google_sheet()
+        drive = setup_google_drive()
+        
+        # Define file to upload
+        file_path = f"{folder}/{picName}"   # image file path
+        print(file_path)
+        
+        # Upload image to the subfolder and get its URL
+        file_url = upload_image_to_drive(drive, file_path)
 
-    # Create subfolder within the parent folder if it doesn't exist
-    subfolder_id = create_subfolder_if_not_exists(drive, subfolder_name, parent_folder_id)
+        sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  # Append a new row with the data
 
-    # Upload image to the subfolder and get its URL
-    file_url = upload_image_to_drive(drive, subfolder_id, file_path)
-
-    sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  # Append a new row with the data
 
 def early_sign_out():
     reason_window = Toplevel(root)
@@ -362,6 +251,13 @@ def late_sign_in():
     return reason  # Return the reason after the window is closed
 
 
+# Function to center any window on the screen
+def center_window(window, width=500, height=400):
+    screen_width = window.winfo_screenwidth()
+    screen_height = window.winfo_screenheight()
+    x = (screen_width // 2) - (width // 2)
+    y = (screen_height // 2) - (height // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
 
 
 # Initialize the Tkinter window
