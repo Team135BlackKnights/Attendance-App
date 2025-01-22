@@ -148,7 +148,7 @@ def process_attendance(current_id, name):
             else:
                 reason = None
     elif event == "Volunteering":
-        reason = "Volunteering" 
+        reason = volunteering_event_window()
     elif event == "Build Season":
         reason = "Build Season"
             
@@ -163,6 +163,41 @@ def process_attendance(current_id, name):
 
     # Confirm attendance recording
     messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}")
+
+# Function to open a window for entering a new name
+def volunteering_event_window():
+    new_window = Toplevel(root)
+    new_window.title("Select An Event")
+    center_window(new_window, width=300, height=200)
+
+    # Make the new window auto-focused
+    new_window.focus_force()
+
+
+    Label(new_window, text="Select your volunteering event:").pack(pady=10)
+    eventsList = ["Ohio!", "Jelquign", "Boiler Battler"]
+    volunteering_var = StringVar(value= "None") # Default to "None"
+    eventDropdown = OptionMenu(new_window, volunteering_var, *eventsList)
+    eventDropdown.config(font=tk_font_small)
+    eventDropdown.pack()
+
+    event = None
+
+    def returnEvent():
+        """Handles the button press."""
+        nonlocal event
+        event = volunteering_var.get()
+        
+        if event == "None":
+            messagebox.showerror("Error", "Select an event", parent = new_window)
+        else:
+            new_window.destroy()
+            print(event)   
+     
+    Button(new_window, text="Submit", command=lambda: returnEvent()).pack(pady=10)
+    root.wait_window(new_window)  # Wait until the window is closed
+    event = "Volunteering: " + event
+    return event  # Return the event after the window is closed
 
 def push_to_google(current_id, name, attendance_record, reason):
         """Push attendance data to Google Sheets and put the images in a folder"""
@@ -303,7 +338,7 @@ Radiobutton(root, text="Sign In", font=tk_font_smedium, variable=action_var, val
 Radiobutton(root, text="Sign Out", font=tk_font_smedium, variable=action_var, value="out").pack()
 
 # Scan ID Button
-Button(root, text="Scan ID", font=tk_font_smedium, command=lambda: scan_id()).pack(pady=10)
+Button(root, text="Enter", font=tk_font_smedium, command=lambda: scan_id()).pack(pady=10)
 
 # Start the Tkinter event loop
 root.mainloop()

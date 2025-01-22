@@ -5,7 +5,7 @@ import gspread
 import os
 
 
-#API File Path, Change this depending on your API file.
+# API File Path, Change this depending on your API file.
 APIPath = "S:/Robotics/Attendance/robotics-attendance-447321-e6d5dbe6a9d4.json"
 
 
@@ -36,7 +36,7 @@ def make_file_public(drive_service, file_id):
         body=permission
     ).execute()
 
-# Upload an image to a specific folder and return its view link
+# Upload an image and return its view link
 def upload_image_to_drive(drive_service, file_path):
     file_name = os.path.basename(file_path)
     file_metadata = {
