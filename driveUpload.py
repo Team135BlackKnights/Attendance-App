@@ -6,15 +6,16 @@ import os
 
 
 # API File Path, Change this depending on your API file.
-APIPath = "S:/Robotics/Attendance/robotics-attendance-447321-e6d5dbe6a9d4.json"
+APIPath = "C:/Users/aqazi075/Downloads/robotics-attendance-447321-989eafb69d96.json"
 
 
 # Setup Google Sheets API
-def setup_google_sheet():
+def setup_google_sheet(document = "Internship Attendance Sheet") :
+    # Change this to your sheet's name ^
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
     client = gspread.authorize(creds)
-    sheet = client.open("Internship Attendance Sheet").sheet1  # Change this to your sheet's name
+    sheet = client.open(document)
     return sheet
 
 # Authenticate Google Drive API

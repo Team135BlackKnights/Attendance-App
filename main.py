@@ -159,7 +159,7 @@ def process_attendance(current_id, name):
     writeData(current_id, name, full_date, reason)
 
     # Push data to Google Sheets
-    push_to_google(current_id, name, full_date, reason)
+    push_to_google(current_id, name, full_date, event, reason)
 
     # Confirm attendance recording
     messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}")
@@ -199,10 +199,10 @@ def volunteering_event_window():
     event = "Volunteering: " + event
     return event  # Return the event after the window is closed
 
-def push_to_google(current_id, name, attendance_record, reason):
+def push_to_google(current_id, name, attendance_record, event, reason):
         """Push attendance data to Google Sheets and put the images in a folder"""
     
-        sheet = setup_google_sheet()
+        spreadsheet = setup_google_sheet()
         drive = setup_google_drive()
         
         # Define file to upload
@@ -211,8 +211,14 @@ def push_to_google(current_id, name, attendance_record, reason):
         
         # Upload image to the subfolder and get its URL
         file_url = upload_image_to_drive(drive, file_path)
-
-        sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  # Append a new row with the data
+        
+        # Append a new row with the data
+        if event != "Volunteering":
+            sheet = spreadsheet.worksheet("Main Attendance")  # Select the correct sheet
+            sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  
+        else:
+            sheet = spreadsheet.worksheet("Volunteering")  
+            sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  
 
 
 def early_sign_out():
