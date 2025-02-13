@@ -13,6 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from tkinter import font
 import gspread
 import time
+import threading
 
 # Ensure the table is created
 createTable()
@@ -157,12 +158,45 @@ def process_attendance(current_id, name):
 
     # Store the attendance in the database
     writeData(current_id, name, full_date, reason)
+    
+    # Display a loading screen
+    load = open_loading_window()
 
-    # Push data to Google Sheets
-    push_to_google(current_id, name, full_date, event, reason)
+    # Push data to Google Sheets on a seperate thread so the loading screen can render in
+    threading.Thread(
+        target=push_to_google,
+        args=(current_id, name, full_date, event, reason, load)
+    ).start()
 
-    # Confirm attendance recording
-    messagebox.showinfo("Attendance Recorded", f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}")
+
+def open_loading_window():
+    loading_window = Toplevel(root)
+    loading_window.title("Loading...")
+    center_window(loading_window, width=400, height=125)
+
+
+    # Make the smile window auto-focused
+    loading_window.focus_force()
+
+    # Display the "Smile!" message immediately
+    display_loading_message(loading_window)
+
+    return(loading_window)
+
+
+# Function to display a loading screen
+def display_loading_message(window):
+    for widget in window.winfo_children():
+        widget.destroy()  # Clear existing widgets
+
+    loading_label = Label(
+        window,
+        text="Loading, please wait...",
+        font=("Helvetica", 26, "bold"),
+        fg="#4CAF50",
+        bg="#FFFFFF"
+    )
+    loading_label.pack(expand=True, fill=tk.BOTH)
 
 # Function to open a window for entering a new name
 def volunteering_event_window():
@@ -199,9 +233,9 @@ def volunteering_event_window():
     event = "Volunteering: " + event
     return event  # Return the event after the window is closed
 
-def push_to_google(current_id, name, attendance_record, event, reason):
-        """Push attendance data to Google Sheets and put the images in a folder"""
-    
+def push_to_google(current_id, name, attendance_record, event, reason, load):
+    """Push attendance data to Google Sheets and put the images in a folder"""
+    try:
         spreadsheet = setup_google_sheet()
         drive = setup_google_drive()
         
@@ -219,6 +253,14 @@ def push_to_google(current_id, name, attendance_record, event, reason):
         else:
             sheet = spreadsheet.worksheet("Volunteering")  
             sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  
+
+    finally:
+        # Close loading window and show confirmation
+        root.after(0, load.destroy)
+        root.after(0, lambda: messagebox.showinfo(
+            "Attendance Recorded", 
+            f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
+        ))
 
 
 def early_sign_out():
