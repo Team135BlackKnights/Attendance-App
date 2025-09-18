@@ -21,7 +21,7 @@ def takePic(picname, folder):
     ret, frame = cap.read()
     if ret:
         # Apply gamma correction
-        frame_gamma_corrected = increase_gamma(frame)
+        frame_gamma_corrected = increase_gamma(frame, 3)
 
         # Save the image with the corrected gamma
         cv2.imwrite(f"images/{folder}/{picname}.jpeg", frame_gamma_corrected)
