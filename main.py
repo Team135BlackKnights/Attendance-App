@@ -18,6 +18,14 @@ import threading
 # Ensure the table is created
 createTable()
 
+#Get the list of open sheets
+global volunteeringList
+volunteeringList = list_sheets()
+print(volunteeringList)
+#Removes the first two values, which are always the same and not volunteering
+volunteeringList.pop(0)
+volunteeringList.pop(0)
+
 
 # Function to handle scanning the ID
 def scan_id(event=None):
@@ -201,8 +209,8 @@ def process_attendance(current_id, name, hasPic = True):
         ).start()
     else:
         threading.Thread(
-            target=push_without_photo,
-            args=(current_id, name, full_date, event, reason, load)
+            target=push_to_google,
+            args=(current_id, name, full_date, event, reason, load, False)
         ).start()
 
 
@@ -246,9 +254,9 @@ def volunteering_event_window():
 
 
     Label(new_window, text="Select your volunteering event:").pack(pady=10)
-    eventsList = ["Ohio!", "Jelquign", "Boiler Battler"]
+
     volunteering_var = StringVar(value= "None") # Default to "None"
-    eventDropdown = OptionMenu(new_window, volunteering_var, *eventsList)
+    eventDropdown = OptionMenu(new_window, volunteering_var, *volunteeringList)
     eventDropdown.config(font=tk_font_small)
     eventDropdown.pack()
 
@@ -267,29 +275,35 @@ def volunteering_event_window():
      
     Button(new_window, text="Submit", command=lambda: returnEvent()).pack(pady=10)
     root.wait_window(new_window)  # Wait until the window is closed
-    event = "Volunteering: " + event
     return event  # Return the event after the window is closed
 
-def push_to_google(current_id, name, attendance_record, event, reason, load):
+def push_to_google(current_id, name, attendance_record, event, reason, load, hasPic = True):
     """Push attendance data to Google Sheets and put the images in a folder"""
     try:
         spreadsheet = setup_google_sheet()
         drive = setup_google_drive()
         
-        # Define file to upload
-        file_path = f"{folder}/{picName}"   # image file path
-        print(file_path)
-        
-        # Upload image to the subfolder and get its URL
-        file_url = upload_image_to_drive(drive, file_path)
+        if (hasPic):
+            # Define file to upload
+            file_path = f"{folder}/{picName}"   # image file path
+            print(file_path)
+            
+            # Upload image to the subfolder and get its URL
+            file_url = upload_image_to_drive(drive, file_path)
+        else:
+            file_path = "No Image"
+            file_url = "No Image"
         
         # Append a new row with the data
-        if event != "Volunteering":
+        if (reason not in volunteeringList) and reason != "Build Season" :
             sheet = spreadsheet.worksheet("Main Attendance")  # Select the correct sheet
             sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  
+        elif reason == "Build Season":
+            sheet = spreadsheet.worksheet("Build Season")  
+            sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason]) 
         else:
-            sheet = spreadsheet.worksheet("Volunteering")  
-            sheet.append_row([current_id, name, attendance_record, file_path, file_url, reason])  
+            sheet = spreadsheet.worksheet(reason)  
+            sheet.append_row([current_id, name, attendance_record, file_path, file_url]) 
 
     finally:
         # Close loading window and show confirmation
@@ -297,30 +311,9 @@ def push_to_google(current_id, name, attendance_record, event, reason, load):
         root.after(0, lambda: messagebox.showinfo(
             "Attendance Recorded", 
             f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
-        ))
+        ))       
 
 
-def push_without_photo(current_id, name, attendance_record, event, reason, load):
-    """Push attendance data to Google Sheets without an image"""
-    try:
-        spreadsheet = setup_google_sheet()
-        
-
-        # Append a new row with the data
-        if event != "Volunteering":
-            sheet = spreadsheet.worksheet("Main Attendance")  # Select the correct sheet
-            sheet.append_row([current_id, name, attendance_record, "No Image", "No Image", reason])  
-        else:
-            sheet = spreadsheet.worksheet("Volunteering")  
-            sheet.append_row([current_id, name, attendance_record, "No Image", "No Image", reason])  
-
-    finally:
-        # Close loading window and show confirmation
-        root.after(0, load.destroy)
-        root.after(0, lambda: messagebox.showinfo(
-            "Attendance Recorded", 
-            f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
-        ))
 
 
 
@@ -436,7 +429,10 @@ id_entry.bind("<Return>", lambda event: scan_id())  # Bind Enter key to scan_id 
 
 # Dropdown menu for specific event leading to being in the lab
 Label(root, text="Why are you here:", font=tk_font_small).pack(pady=5)
-eventsList = ["Internship", "Volunteering", "Build Season"]
+if len(volunteeringList) > 0:
+    eventsList = ["Internship", "Build Season", "Volunteering"]
+else :
+    eventsList = ["Internship", "Build Season"]
 w = OptionMenu(root, event_var, *eventsList)
 w.config(font=tk_font_small)
 w.pack()
