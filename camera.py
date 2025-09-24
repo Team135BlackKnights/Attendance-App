@@ -28,6 +28,7 @@ def takePic(picname, folder):
         print(f"Image saved as '{picname}.jpeg'.")
     else:
         print("Error: Couldn't capture an image.")
+        return("fail")
 
     cap.release()
     cv2.destroyAllWindows()

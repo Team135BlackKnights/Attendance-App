@@ -114,17 +114,48 @@ def take_picture_and_record(window, current_id, name):
     file_date = now.strftime("%I-%M-%p-%Y-%m-%d")
     global picName
     picName = f"{name}__{file_date}.jpeg"
-    takePic(f"{name}__{file_date}", f"{current_id}-{name}")
+    confirmation = takePic(f"{name}__{file_date}", f"{current_id}-{name}")
 
     window.destroy()  # Close the smile window
 
-    # Record attendance and push to Google Sheets
-    process_attendance(current_id, name)
+    if (confirmation == None):
+        # Record attendance and push to Google Sheets
+        process_attendance(current_id, name)
+    else:
+        open_fail_window(current_id, name)
 
+
+def open_fail_window(current_id, name):
+    fail_window = Toplevel(root)
+    fail_window.title("Camera Failure")
+    center_window(fail_window, width=550, height=175)
+
+    fail_window.focus_force()
+    #Override to push without picture data
+    fail_window.bind("<Control-o>", lambda event: process_attendance(current_id, name, False))
+
+    display_fail_message(fail_window)
+
+    return(fail_window)
+
+
+# Function to display a loading screen
+def display_fail_message(window):
+    for widget in window.winfo_children():
+        widget.destroy()  # Clear existing widgets
+
+    loading_label = Label(
+        window,
+        text="Failed to take a picture, try again.",
+        font=("Helvetica", 26, "bold"),
+        fg="#CA2B16",
+        bg="#FFFFFF"
+    )
+    loading_label.pack(expand=True, fill=tk.BOTH)
     
 
 # Function to process attendance
-def process_attendance(current_id, name):
+def process_attendance(current_id, name, hasPic = True):
     now = datetime.now()
     formatted_time = now.strftime("%I:%M %p")
     formatted_date = now.strftime("%Y-%m-%d")
@@ -163,10 +194,16 @@ def process_attendance(current_id, name):
     load = open_loading_window()
 
     # Push data to Google Sheets on a seperate thread so the loading screen can render in
-    threading.Thread(
-        target=push_to_google,
-        args=(current_id, name, full_date, event, reason, load)
-    ).start()
+    if (hasPic):
+        threading.Thread(
+            target=push_to_google,
+            args=(current_id, name, full_date, event, reason, load)
+        ).start()
+    else:
+        threading.Thread(
+            target=push_without_photo,
+            args=(current_id, name, full_date, event, reason, load)
+        ).start()
 
 
 def open_loading_window():
@@ -175,10 +212,10 @@ def open_loading_window():
     center_window(loading_window, width=400, height=125)
 
 
-    # Make the smile window auto-focused
+    # Make the  window auto-focused
     loading_window.focus_force()
 
-    # Display the "Smile!" message immediately
+    # Display the message immediately
     display_loading_message(loading_window)
 
     return(loading_window)
@@ -261,6 +298,30 @@ def push_to_google(current_id, name, attendance_record, event, reason, load):
             "Attendance Recorded", 
             f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
         ))
+
+
+def push_without_photo(current_id, name, attendance_record, event, reason, load):
+    """Push attendance data to Google Sheets without an image"""
+    try:
+        spreadsheet = setup_google_sheet()
+        
+
+        # Append a new row with the data
+        if event != "Volunteering":
+            sheet = spreadsheet.worksheet("Main Attendance")  # Select the correct sheet
+            sheet.append_row([current_id, name, attendance_record, "No Image", "No Image", reason])  
+        else:
+            sheet = spreadsheet.worksheet("Volunteering")  
+            sheet.append_row([current_id, name, attendance_record, "No Image", "No Image", reason])  
+
+    finally:
+        # Close loading window and show confirmation
+        root.after(0, load.destroy)
+        root.after(0, lambda: messagebox.showinfo(
+            "Attendance Recorded", 
+            f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
+        ))
+
 
 
 def early_sign_out():
