@@ -1,68 +1,59 @@
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from oauth2client.service_account import ServiceAccountCredentials
-import gspread
+import requests
 import os
 
+API_BASE_URL = "http://127.0.0.1:5000/api"
 
-# API File Path, Change this depending on your API file.
-APIPath = "C:/Users/aqazi075/Downloads/robotics-attendance-447321-ca10f1c31867.json"
-defaultDoc = "Internship Attendance Sheet"
+def push_attendance_to_api(record):
+    # Upload image
+    image_url = None
+    if record.get("image_path") and os.path.exists(record["image_path"]):
+        with open(record["image_path"], "rb") as img_file:
+            files = {"image": img_file}
+            try:
+                resp = requests.post(f"{API_BASE_URL}/upload_image", files=files)
+                resp.raise_for_status()
+                res_json = resp.json()
+                if res_json.get("status") == "success":
+                    image_url = res_json.get("image_url")
+                else:
+                    return {"status": "error", "message": "Failed to upload image"}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
 
-
-# Setup Google Sheets API
-def setup_google_sheet(document = defaultDoc) :
-    # Change this to your sheet's name ^
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open(document)
-    return sheet
-
-# Authenticate Google Drive API
-def setup_google_drive():
-    scope = ['https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
-    drive_service = build('drive', 'v3', credentials=creds)
-    return drive_service
-
-def list_sheets(document = defaultDoc):
-    spreadsheet = setup_google_sheet(document)
-    worksheets = spreadsheet.worksheets()   # list of Worksheet objects
-    sheet_names = [ws.title for ws in worksheets]
-    return sheet_names
-
-    
-# Set file permissions to make it publicly accessible
-def make_file_public(drive_service, file_id):
-    permission = {
-        'role': 'reader',
-        'type': 'anyone'
+    payload = {
+        "id": record["id"],
+        "name": record["name"],
+        "date": record["date"],
+        "reason": record.get("reason"),
+        "image_url": image_url
     }
-    drive_service.permissions().create(
-        fileId=file_id,
-        body=permission
-    ).execute()
 
-# Upload an image and return its view link
-def upload_image_to_drive(drive_service, file_path):
-    file_name = os.path.basename(file_path)
-    file_metadata = {
-        'name': file_name,
-    }
-    media = MediaFileUpload(file_path, mimetype='image/jpeg')  # Adjust mimetype if needed
+    try:
+        resp = requests.post(f"{API_BASE_URL}/record_attendance", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-    # Upload file
-    file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id, webViewLink, webContentLink'
-    ).execute()
 
-    # Make the file public
-    make_file_public(drive_service, file.get('id'))
+def list_sheets():
+    try:
+        resp = requests.get(f"{API_BASE_URL}/list_sheets")
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "success":
+            return data.get("sheets", [])
+        else:
+            return []
+    except Exception:
+        return []
 
-    # Get the file's webViewLink to share
-    file_url = file.get('webViewLink')
-    print(f"File uploaded successfully. File URL: {file_url}")
-    return file_url
+
+def create_sheet_if_missing(sheet_name, owner_email=None):
+    payload = {"sheet_name": sheet_name, "owner_email": owner_email}
+    try:
+        resp = requests.post(f"{API_BASE_URL}/create_sheet", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
