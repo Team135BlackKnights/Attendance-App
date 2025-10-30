@@ -2,3 +2,6 @@
 *.db
 *.pyc
 *.jpeg
+skibidi.jpg
+service_account.json
+apiTest.py

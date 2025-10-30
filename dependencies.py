@@ -6,7 +6,7 @@ import sys
 # List of required dependencies
 dependencies = [
     "pillow", "gspread", "google-api-python-client",
-    "oauth2client", "sqlite3", "tk", "pyglet", "opencv-python"
+    "oauth2client", "sqlite3", "tk", "pyglet", "opencv-python", "Flask"
 ]
 
 def install_dependencies():
