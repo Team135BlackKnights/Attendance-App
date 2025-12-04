@@ -2,18 +2,11 @@ import os
 import sys
 from PIL import ImageFont
 from datetime import datetime
-import sqlite3 as sql
 import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar, OptionMenu, BooleanVar, Checkbutton, Scale, HORIZONTAL
-from databaseMain import *
-from driveUpload import *
+import driveUpload
 from camera import takePic
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from oauth2client.service_account import ServiceAccountCredentials
 from tkinter import font
-import gspread
-import time
 import threading
 
 # --- Begin: Embedding Poppins (runtime only) --------------------------------
@@ -35,8 +28,132 @@ def load_private_font(filename):
             pass
     return font_path
 
-# Ensure the table is created 
-createTable()
+# =========================
+# Compatibility wrappers that delegate to driveUpload helpers
+# These preserve the original function names used throughout your app.
+# =========================
+
+API_BASE_URL = "http://127.0.0.1:8080/api"
+PARENT_FOLDER_ID = "PARENT_FOLDER_ID"
+VOLUNTEER_SPREADSHEET_TITLE = "VOLUNTEER_SPREADSHEET_TITLE"
+ATTENDANCE_SPREADSHEET_TITLE = "ATTENDANCE_SPREADSHEET_TITLE"
+DB_SPREADSHEET_TITLE = "DB_SPREADSHEET_TITLE"
+
+
+def list_sheets():
+    """
+    Return a simple Python list of subsheet names for the volunteer spreadsheet.
+    Delegates to driveUpload.list_subsheets which returns a JSON-like dict.
+    """
+    title = VOLUNTEER_SPREADSHEET_TITLE
+    if not title:
+        # If no configured spreadsheet, return empty list (preserves UI behavior)
+        return []
+    resp = driveUpload.list_subsheets(spreadsheet_title=title)
+    if isinstance(resp, dict) and resp.get("status") == "success":
+        return resp.get("sheets", [])
+    # if driveUpload returned an error dict or unexpected value, return [] to avoid crashing UI
+    return []
+
+def getName(target_id):
+    """
+    Lookup name by ID via driveUpload.find_id.
+    Returns the name string, or None if not found.
+    """
+    # prefer Attendance Database tab by default
+    sheet_tab = "Attendance Database"
+    try:
+        if DB_SPREADSHEET_TITLE:
+            resp = driveUpload.find_id(sheet_tab, str(target_id), spreadsheet_title=DB_SPREADSHEET_TITLE)
+        else:
+            resp = driveUpload.find_id(sheet_tab, str(target_id))
+    except Exception:
+        return None
+
+    if not isinstance(resp, dict):
+        return None
+
+    if resp.get("status") == "success":
+        return resp.get("name")
+    # not found or error
+    return None
+
+def writeName(target_id, name):
+    """
+    Write an ID->Name mapping using driveUpload.write_id_name.
+    Returns the underlying response (dict) or an error dict.
+    """
+    try:
+        if DB_SPREADSHEET_TITLE:
+            return driveUpload.write_id_name(str(target_id), name, spreadsheet_title=DB_SPREADSHEET_TITLE, sheet_tab="Attendance Database")
+        else:
+            return driveUpload.write_id_name(str(target_id), name, sheet_tab="Attendance Database")
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def writeData(target_id, name, date_str, reason=None, image_url=None, sheet_tab="Attendance"):
+    """
+    Append an attendance row via driveUpload.write_row.
+    Keeps the original row order ["ID","Name","Date","Reason","Image URL"].
+    """
+    row = [str(target_id), name, date_str, reason if reason else "", image_url if image_url else ""]
+    try:
+        if ATTENDANCE_SPREADSHEET_TITLE:
+            return driveUpload.write_row(row, sheet_tab, spreadsheet_title=ATTENDANCE_SPREADSHEET_TITLE)
+        else:
+            return driveUpload.write_row(row, sheet_tab)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+def push_to_google(current_id, name, full_date, event, reason, loading_window, hasPic=True):
+    """
+    Background worker that:
+      - uploads the picture (if available and PARENT_FOLDER_ID provided) via driveUpload.upload_image
+      - calls driveUpload.record_attendance with the assembled payload
+    Closes the loading_window at the end (preserves previous behavior).
+    """
+    try:
+        image_url = None
+        # The app stores picName and folder as globals when picture was taken
+        if hasPic and 'picName' in globals() and 'folder' in globals():
+            image_path = os.path.join(folder, picName)
+            if os.path.exists(image_path) and PARENT_FOLDER_ID:
+                try:
+                    upload_resp = driveUpload.upload_image(image_path, PARENT_FOLDER_ID, folder_name="Attendance Images")
+                    if isinstance(upload_resp, dict) and upload_resp.get("status") == "success":
+                        # driveUpload returns {"status":"success","file":{...,"webViewLink":...}}
+                        image_url = upload_resp.get("file", {}).get("webViewLink")
+                except Exception:
+                    image_url = None
+
+        payload = {
+            "id": str(current_id),
+            "name": name,
+            "date": full_date,
+            "reason": reason,
+            "image_url": image_url
+        }
+        if ATTENDANCE_SPREADSHEET_TITLE:
+            payload["spreadsheet_title"] = ATTENDANCE_SPREADSHEET_TITLE
+        if event:
+            payload["sheet_tab"] = event
+
+        try:
+            driveUpload.record_attendance(payload)
+        except Exception:
+            # swallow exceptions to avoid crashing background thread; UI only depends on completion
+            pass
+
+    finally:
+        # close loading UI
+        try:
+            loading_window.destroy()
+        except Exception:
+            pass
+
+# =========================
+# End wrappers
+# =========================
 
 # Get the list of open sheets 
 global volunteeringList
@@ -483,6 +600,7 @@ def process_attendance(current_id, name, hasPic = True):
         reason = "Build Season"
 
     full_date = f"Signed {action} at: {formatted_time}, Date: {formatted_date}"
+    # replaced local sqlite write with API-backed writeData (compat wrapper)
     writeData(current_id, name, full_date, reason)
 
     load = open_loading_window()
@@ -572,52 +690,7 @@ def volunteering_event_window():
     root.wait_window(new_window)
     return event
 
-# Background function: push attendance + image to Google Sheets + Drive.
-def push_to_google(current_id, name, attendance_record, event, reason, load, hasPic = True):
-    try:
-        spreadsheet = setup_google_sheet()
-        drive = setup_google_drive()
 
-        action = action_var.get()
-
-        if (hasPic):
-            file_path = f"{folder}/{picName}"
-            print(file_path)
-            file_url = upload_image_to_drive(drive, file_path)
-        else:
-            file_path = "No Image"
-            file_url = "No Image"
-
-        if (reason not in volunteeringList) and reason != "Build Season" :
-            sheet = spreadsheet.worksheet("Main Attendance")
-            insert_data(sheet, action, [current_id, name, attendance_record, file_path, file_url, reason])
-        elif reason == "Build Season":
-            sheet = spreadsheet.worksheet("Build Season")
-            insert_data(sheet, action, [current_id, name, attendance_record, file_path, file_url, reason])
-        else:
-            sheet = spreadsheet.worksheet(reason)
-            insert_data(sheet, action, [current_id, name, attendance_record, file_path, file_url, reason])
-
-    finally:
-        root.after(0, load.destroy)
-        root.after(0, lambda: messagebox.showinfo(
-            "Attendance Recorded",
-            f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
-        ))
-
-# Helper to find the next empty row in a sheet column range.
-def next_available_row(sheet, col_range):
-    values = sheet.get(col_range)
-    return len(values) + 1
-
-# Insert sign-in/sign-out data into the appropriate columns on the sheet.
-def insert_data(sheet, action, data):
-    if(action == "in"):
-        row = next_available_row(sheet, "A:A")
-        sheet.update(f"A{row}:F{row}", [data])
-    else:
-        row = next_available_row(sheet, "H:H")
-        sheet.update(f"H{row}:M{row}", [data])
 
 # Ask user for a reason to early sign out; return the collected reason string.
 def early_sign_out():

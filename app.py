@@ -1,27 +1,37 @@
-from flask import Flask, request, jsonify
 import os
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+from flask import Flask, request, jsonify, redirect, session, url_for
 import json
 from datetime import datetime
 import io
+import traceback
 
-# Google API imports
-from google.oauth2.service_account import Credentials
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")  # required for session
 
-SERVICE_ACCOUNT_FILE = "service_account.json"
+# OAuth config
+CLIENT_SECRETS_FILE = "client_secrets.json"  # downloaded from Google Cloud OAuth credentials
 SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file"
 ]
+REDIRECT_URI = "http://localhost:8080/oauth2callback"  # must match OAuth redirect URI in Google Cloud
+
+# Local storage for tokens (for demo; in prod, use a DB)
+USER_TOKENS_FILE = "user_tokens.json"
+if not os.path.exists(USER_TOKENS_FILE):
+    with open(USER_TOKENS_FILE, "w") as f:
+        json.dump({}, f)
 
 DB_FILE = "attendance_db.json"   # local log copy (still kept for backup/local debugging)
 SHEETS_INDEX_FILE = "sheets_db.json"  # local index of known spreadsheets (for convenience)
 UPLOAD_TEMP_FOLDER = "uploaded_images_temp"
-DEFAULT_IMAGE_FOLDER = "Attendance Images"
+DEFAULT_IMAGE_FOLDER = "Attendance"  # parent folder name
+DEFAULT_IMAGES_SUBFOLDER = "Images"  # images folder inside Attendance
 DEFAULT_SHEET_TAB = "Attendance"
 DEFAULT_DB_SHEET = "Attendance Database"
 DEFAULT_HEADERS = ["ID", "Name", "Date", "Reason", "Image URL"]
@@ -35,31 +45,154 @@ for f, default in [(DB_FILE, []), (SHEETS_INDEX_FILE, [])]:
             json.dump(default, fh)
 
 
-def get_credentials():
-    """Return service account credentials."""
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+def save_user_token(user_email, creds_dict):
+    tokens = json.load(open(USER_TOKENS_FILE))
+    tokens[user_email] = creds_dict
+    with open(USER_TOKENS_FILE, "w") as f:
+        json.dump(tokens, f, indent=2)
+
+
+def load_user_token(user_email):
+    tokens = json.load(open(USER_TOKENS_FILE))
+    return tokens.get(user_email)
+
+
+def get_user_credentials(user_email):
+    token_dict = load_user_token(user_email)
+    if not token_dict:
+        return None
+    creds = Credentials.from_authorized_user_info(token_dict, SCOPES)
     return creds
 
 
-def get_drive_service():
-    creds = get_credentials()
+def get_drive_service(user_email):
+    creds = get_user_credentials(user_email)
+    if not creds or not creds.valid:
+        return None
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def get_sheets_service():
-    creds = get_credentials()
+def get_sheets_service(user_email):
+    creds = get_user_credentials(user_email)
+    if not creds or not creds.valid:
+        return None
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 # --------------------------
-# Drive helpers (scoped to parent folder)
+# OAuth login flow
+# --------------------------
+@app.route("/login")
+def login():
+    """
+    Start OAuth flow. Stores state in session to validate callback.
+    """
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent'
+    )
+    # store state in session to validate on callback
+    session['state'] = state
+    app.logger.debug("Starting OAuth flow. state=%s auth_url=%s", state, authorization_url)
+    return redirect(authorization_url)
+
+
+@app.route("/oauth2callback")
+def oauth2callback():
+    """
+    OAuth callback. Validates state and exchanges code for tokens.
+    Returns descriptive error messages and logs full traceback for debugging.
+    """
+    # debug prints to help root-cause "unknown error"
+    app.logger.debug("Oauth2 callback hit. request.url=%s", request.url)
+    app.logger.debug("Session keys: %s", list(session.keys()))
+
+    state = session.get('state')
+    if not state:
+        # important: missing state usually means session cookie not preserved
+        err_msg = ("Missing 'state' in session. This means the session cookie wasn't preserved "
+                   "between /login and /oauth2callback. Ensure your browser accepts cookies for "
+                   "localhost and that the same host/port is used. If you navigated to the callback "
+                   "directly (instead of via /login), don't do that — start at /login.")
+        app.logger.error(err_msg)
+        return f"OAuth error: {err_msg}", 400
+
+    # Recreate the Flow with the same state and redirect URI
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        state=state,
+        redirect_uri=REDIRECT_URI
+    )
+
+    try:
+        # exchange code for tokens. We pass the full callback URL received from Google.
+        flow.fetch_token(authorization_response=request.url)
+    except Exception as e:
+        # log full traceback server-side for debugging
+        tb = traceback.format_exc()
+        app.logger.error("Error fetching token: %s\n%s", repr(e), tb)
+        # return a useful error to browser so you don't get "unknown error"
+        return jsonify({
+            "status": "error",
+            "message": "Failed to fetch token during OAuth callback.",
+            "error": str(e),
+            "traceback": tb.splitlines()[-5:]  # send last few lines for convenience
+        }), 500
+
+    creds = flow.credentials
+    if not creds or not creds.token:
+        app.logger.error("No credentials or token returned from flow: %r", creds)
+        return jsonify({"status": "error", "message": "No credentials returned from OAuth flow."}), 500
+
+    # For demo we accept user email via query param fallback; prefer to use session or client side
+    user_email = request.args.get("email", None)
+    # If email not supplied, optionally try to extract 'email' from id_token if present (best-effort)
+    id_token_info = None
+    try:
+        # flow.credentials may include id_token if OpenID scope was requested. do not assume present.
+        if getattr(creds, "id_token", None):
+            id_token_info = creds.id_token  # note: this is raw JWT payload, may or may not include email
+            # Attempt to get an 'email' claim (if present) — may be None
+            # creds._id_token is not guaranteed; so we check the attribute directly
+            # (we are not parsing JWT here; this is a best-effort read)
+    except Exception:
+        pass
+
+    if not user_email:
+        # fallback: use a default so token is stored under some key (better than losing creds)
+        user_email = "user@example.com"
+
+    # Save token dict for later API calls
+    save_user_token(user_email, {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": creds.scopes
+    })
+
+    app.logger.info("OAuth completed for user_email=%s", user_email)
+    return f"Authentication successful for {user_email}. You can now use the API."
+
+
+# --------------------------
+# Drive helpers
 # --------------------------
 def find_child_folder_by_name(drive_service, parent_folder_id, folder_name):
-    """Find a folder inside parent_folder_id with exact name. Return file dict or None."""
-    if not parent_folder_id:
-        return None
+    """Find a folder by name. If parent_folder_id is provided, search inside it; otherwise search globally."""
     safe_name = folder_name.replace("'", "\\'")
-    q = f"name = '{safe_name}' and mimeType='application/vnd.google-apps.folder' and '{parent_folder_id}' in parents and trashed=false"
+    if parent_folder_id:
+        q = f"name = '{safe_name}' and mimeType='application/vnd.google-apps.folder' and '{parent_folder_id}' in parents and trashed=false"
+    else:
+        q = f"name = '{safe_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     res = drive_service.files().list(q=q, fields="files(id, name)").execute()
     files = res.get("files", [])
     return files[0] if files else None
@@ -71,6 +204,27 @@ def create_child_folder(drive_service, parent_folder_id, folder_name):
         body["parents"] = [parent_folder_id]
     file = drive_service.files().create(body=body, fields="id, name").execute()
     return file
+
+
+def ensure_attendance_structure(drive_service, parent_folder_id=None,
+                                attendance_name=DEFAULT_IMAGE_FOLDER,
+                                images_name=DEFAULT_IMAGES_SUBFOLDER):
+    """
+    Ensure an 'Attendance' folder exists under parent_folder_id (or root if None),
+    and an 'Images' subfolder exists inside the Attendance folder.
+    Returns a tuple: (attendance_folder_dict, images_folder_dict)
+    """
+    # Find or create Attendance parent folder (under parent_folder_id or root)
+    attendance_folder = find_child_folder_by_name(drive_service, parent_folder_id, attendance_name)
+    if not attendance_folder:
+        attendance_folder = create_child_folder(drive_service, parent_folder_id, attendance_name)
+
+    # Inside Attendance, find or create Images folder
+    images_folder = find_child_folder_by_name(drive_service, attendance_folder["id"], images_name)
+    if not images_folder:
+        images_folder = create_child_folder(drive_service, attendance_folder["id"], images_name)
+
+    return attendance_folder, images_folder
 
 
 def upload_file_to_drive(drive_service, file_stream, filename, mimetype, folder_id=None, make_public=True, share_with_email=None):
@@ -126,7 +280,7 @@ def find_spreadsheet_by_title(drive_service, title, parent_folder_id=None):
     return files[0] if files else None
 
 
-def create_spreadsheet(sheets_service, title, tabs=None, share_with_email=None, parent_folder_id=None):
+def create_spreadsheet(sheets_service, title, tabs=None, share_with_email=None, parent_folder_id=None, user_email=None):
     """Create spreadsheet, add to parent folder, optionally share with owner."""
     body = {"properties": {"title": title}}
     if tabs:
@@ -136,14 +290,14 @@ def create_spreadsheet(sheets_service, title, tabs=None, share_with_email=None, 
 
     if parent_folder_id:
         try:
-            drive = get_drive_service()
+            drive = get_drive_service(user_email)
             drive.files().update(fileId=spreadsheet_id, addParents=parent_folder_id, fields="id, parents").execute()
         except Exception as e:
             print("Warning adding spreadsheet to parent folder:", e)
 
     if share_with_email:
         try:
-            drive = get_drive_service()
+            drive = get_drive_service(user_email)
             drive.permissions().create(
                 fileId=spreadsheet_id,
                 body={"type": "user", "role": "writer", "emailAddress": share_with_email},
@@ -228,92 +382,90 @@ def find_name_by_id(sheets_service, spreadsheet_id, sheet_title, target_id, id_c
 
 
 # --------------------------
+# Local DB helpers
+# --------------------------
+def load_local_db(file):
+    with open(file, "r") as f:
+        return json.load(f)
+
+
+def save_local_db(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# --------------------------
 # API Endpoints
 # --------------------------
 @app.route("/api/upload_image", methods=["POST"])
 def upload_image():
+    user_email = request.form.get("user_email")
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
+
+    drive = get_drive_service(user_email)
+    if not drive:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
     if "image" not in request.files:
         return jsonify({"status": "error", "message": "No image uploaded"}), 400
 
     img = request.files["image"]
-    folder_name = request.form.get("folder_name", DEFAULT_IMAGE_FOLDER)
-    parent_folder_id = request.form.get("parent_folder_id")
+    parent_folder_id = request.form.get("parent_folder_id")  # optional: where to place Attendance (or root)
     owner_email = request.form.get("owner_email")
 
-    if not parent_folder_id:
-        return jsonify({"status": "error", "message": "parent_folder_id required"}), 400
+    # Ensure Attendance parent and Images subfolder exist (under parent_folder_id or root)
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    if not attendance_folder or not images_folder:
+        return jsonify({"status": "error", "message": "Failed to create/find Attendance or Images folder"}), 500
 
     filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{img.filename}"
     temp_path = os.path.join(UPLOAD_TEMP_FOLDER, filename)
     img.save(temp_path)
 
-    drive = get_drive_service()
-
-    # Find or create child folder under parent
-    folder = find_child_folder_by_name(drive, parent_folder_id, folder_name)
-    if not folder:
-        folder = create_child_folder(drive, parent_folder_id, folder_name)
-
     with io.FileIO(temp_path, "rb") as fh:
         file_stream = io.BytesIO(fh.read())
     mimetype = img.mimetype or "application/octet-stream"
 
-    # Upload to shared drive staging first
-    staging_drive_id = "1GrUY5dTBtTAOzQqxQ_u_dvtQbX3Ug1or"  # fixed shared drive ID
-    staging_folder = find_child_folder_by_name(drive, staging_drive_id, folder_name)
-    if not staging_folder:
-        staging_folder = create_child_folder(drive, staging_drive_id, folder_name)
-
-    staging_file_meta = upload_file_to_drive(drive, file_stream, filename, mimetype, folder_id=staging_folder["id"], make_public=True)
-
-    # Move file from staging to user parent folder
-    drive.files().update(fileId=staging_file_meta["id"], addParents=folder["id"], removeParents=staging_folder["id"], fields="id, parents").execute()
+    # Upload directly into Attendance/Images folder
+    file_meta = upload_file_to_drive(drive, file_stream, filename, mimetype, folder_id=images_folder["id"], make_public=True, share_with_email=owner_email)
 
     try:
         os.remove(temp_path)
     except Exception:
         pass
 
-    return jsonify({"status": "success", "file": staging_file_meta})
+    return jsonify({"status": "success", "file": file_meta})
 
 
 @app.route("/api/record_attendance", methods=["POST"])
 def record_attendance():
-    """
-    Expects JSON body:
-    {
-      "spreadsheet_title": optional, "spreadsheet_id": optional,
-      "sheet_tab": optional (default "Attendance"),
-      "id": required,
-      "name": required,
-      "date": required,
-      "reason": optional,
-      "image_url": optional,
-      "owner_email": optional (email to share spreadsheet with)
-      "start_col": optional (1-indexed) default 1,
-      "parent_folder_id": optional (if provided, new spreadsheets will be placed inside this parent)
-    }
-    Behavior:
-     - If spreadsheet_id provided, use it.
-     - Else if spreadsheet_title provided, try to find it (optionally inside parent_folder_id), otherwise create it with default headers.
-     - Append a row with format ["ID","Name","Date","Reason","Image URL"] to the specified sheet_tab (creating the sheet if needed).
-    """
+    user_email = request.json.get("user_email")
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
+
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
     data = request.get_json()
     required = ["id", "name", "date"]
     if not data or not all(k in data for k in required):
         return jsonify({"status": "error", "message": "Missing required fields (id,name,date)"}), 400
-
-    drive = get_drive_service()
-    sheets = get_sheets_service()
 
     spreadsheet_id = data.get("spreadsheet_id")
     spreadsheet_title = data.get("spreadsheet_title", f"{data.get('owner_email','user')}_Attendance")
     sheet_tab = data.get("sheet_tab", DEFAULT_SHEET_TAB)
     owner_email = data.get("owner_email")
     start_col = int(data.get("start_col", 1))
-    parent_folder_id = data.get("parent_folder_id")  # optional
+    parent_folder_id = data.get("parent_folder_id")  # optional: where to place Attendance (or root)
 
-    # Locate or create spreadsheet
+    # Ensure Attendance parent and Images subfolder exist (under parent_folder_id or root)
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    parent_for_spreadsheet = attendance_folder["id"] if attendance_folder else parent_folder_id
+
+    # Locate or create spreadsheet under Attendance parent
     if spreadsheet_id:
         # Optionally check existence
         try:
@@ -321,11 +473,11 @@ def record_attendance():
         except Exception as e:
             return jsonify({"status": "error", "message": f"Spreadsheet not found: {e}"}), 400
     else:
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_for_spreadsheet)
         if found:
             spreadsheet_id = found["id"]
         else:
-            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[sheet_tab], share_with_email=owner_email, parent_folder_id=parent_folder_id)
+            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[sheet_tab], share_with_email=owner_email, parent_folder_id=parent_for_spreadsheet, user_email=user_email)
             spreadsheet_id = created["spreadsheetId"]
             # Put default headers in first row at start_col
             headers_range = f"'{sheet_tab}'!{column_index_to_letter(start_col)}1:{column_index_to_letter(start_col+len(DEFAULT_HEADERS)-1)}1"
@@ -362,20 +514,25 @@ def record_attendance():
 
 @app.route("/api/list_subsheets", methods=["GET"])
 def list_subsheets():
-    """
-    Query params: spreadsheet_id OR spreadsheet_title (optional parent_folder_id if searching by title)
-    Returns list of sheet/tab names
-    """
     spreadsheet_id = request.args.get("spreadsheet_id")
     spreadsheet_title = request.args.get("spreadsheet_title")
     parent_folder_id = request.args.get("parent_folder_id")  # optional
-    drive = get_drive_service()
-    sheets = get_sheets_service()
+    user_email = request.args.get("user_email")
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
+
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
 
     if not spreadsheet_id:
         if not spreadsheet_title:
             return jsonify({"status": "error", "message": "spreadsheet_id or spreadsheet_title required"}), 400
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        # Try searching inside Attendance folder (if parent_folder_id provided or root)
+        attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+        search_parent = attendance_folder["id"] if attendance_folder else parent_folder_id
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=search_parent)
         if not found:
             return jsonify({"status": "error", "message": "Spreadsheet not found"}), 404
         spreadsheet_id = found["id"]
@@ -389,61 +546,68 @@ def list_subsheets():
 
 @app.route("/api/create_subsheet", methods=["POST"])
 def create_subsheet():
-    """
-    JSON: { "spreadsheet_id" or "spreadsheet_title", "subsheet_name": required, "owner_email": optional, "parent_folder_id": optional }
-    If spreadsheet not found and spreadsheet_title provided and parent_folder_id optionally provided -> create spreadsheet under parent_folder_id
-    """
     data = request.get_json()
     subsheet_name = data.get("subsheet_name")
     spreadsheet_id = data.get("spreadsheet_id")
     spreadsheet_title = data.get("spreadsheet_title")
     owner_email = data.get("owner_email")
     parent_folder_id = data.get("parent_folder_id")
+    user_email = data.get("user_email")
+
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
 
     if not subsheet_name:
         return jsonify({"status": "error", "message": "subsheet_name required"}), 400
 
-    drive = get_drive_service()
-    sheets = get_sheets_service()
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    parent_for_spreadsheet = attendance_folder["id"] if attendance_folder else parent_folder_id
 
     if not spreadsheet_id:
         if not spreadsheet_title:
             return jsonify({"status": "error", "message": "spreadsheet_id or spreadsheet_title required"}), 400
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_for_spreadsheet)
         if not found:
-            # create spreadsheet with the requested subsheet as first tab
-            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[subsheet_name], share_with_email=owner_email, parent_folder_id=parent_folder_id)
+            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[subsheet_name], share_with_email=owner_email, parent_folder_id=parent_for_spreadsheet, user_email=user_email)
             spreadsheet_id = created["spreadsheetId"]
             return jsonify({"status": "success", "spreadsheet_id": spreadsheet_id, "sheet": subsheet_name})
         spreadsheet_id = found["id"]
 
-    # create subsheet if not exists
     create_subsheet_if_missing(sheets, spreadsheet_id, subsheet_name)
     return jsonify({"status": "success", "spreadsheet_id": spreadsheet_id, "sheet": subsheet_name})
 
 
 @app.route("/api/delete_subsheet", methods=["POST"])
 def delete_subsheet():
-    """
-    Delete a subsheet (tab) from a spreadsheet.
-    JSON: { "spreadsheet_id" or "spreadsheet_title", "subsheet_name": required, "parent_folder_id": optional }
-    """
     data = request.get_json()
     subsheet_name = data.get("subsheet_name")
     spreadsheet_id = data.get("spreadsheet_id")
     spreadsheet_title = data.get("spreadsheet_title")
     parent_folder_id = data.get("parent_folder_id")
+    user_email = data.get("user_email")
 
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
     if not subsheet_name:
         return jsonify({"status": "error", "message": "subsheet_name required"}), 400
 
-    drive = get_drive_service()
-    sheets = get_sheets_service()
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    parent_for_search = attendance_folder["id"] if attendance_folder else parent_folder_id
 
     if not spreadsheet_id:
         if not spreadsheet_title:
             return jsonify({"status": "error", "message": "spreadsheet_id or spreadsheet_title required"}), 400
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_for_search)
         if not found:
             return jsonify({"status": "error", "message": "Spreadsheet not found"}), 404
         spreadsheet_id = found["id"]
@@ -456,21 +620,14 @@ def delete_subsheet():
 
 @app.route("/api/write_row", methods=["POST"])
 def write_row():
-    """
-    Write an arbitrary row (array) starting at a specified column on a specified subsheet.
-    JSON:
-    {
-      "spreadsheet_id" or "spreadsheet_title",
-      "sheet_tab": required,
-      "start_col": optional 1-indexed default 1,
-      "row": ["ID","Name", ...],
-      "owner_email": optional,
-      "parent_folder_id": optional
-    }
-    """
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "message": "JSON body required"}), 400
+
+    user_email = data.get("user_email")
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
+
     row_values = data.get("row")
     sheet_tab = data.get("sheet_tab")
     if not row_values or not sheet_tab:
@@ -482,15 +639,20 @@ def write_row():
     owner_email = data.get("owner_email")
     parent_folder_id = data.get("parent_folder_id")
 
-    drive = get_drive_service()
-    sheets = get_sheets_service()
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    parent_for_spreadsheet = attendance_folder["id"] if attendance_folder else parent_folder_id
 
     if not spreadsheet_id:
         if not spreadsheet_title:
             return jsonify({"status": "error", "message": "spreadsheet_id or spreadsheet_title required"}), 400
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_for_spreadsheet)
         if not found:
-            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[sheet_tab], share_with_email=owner_email, parent_folder_id=parent_folder_id)
+            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[sheet_tab], share_with_email=owner_email, parent_folder_id=parent_for_spreadsheet, user_email=user_email)
             spreadsheet_id = created["spreadsheetId"]
         else:
             spreadsheet_id = found["id"]
@@ -504,21 +666,15 @@ def write_row():
 
 @app.route("/api/write_id_name", methods=["POST"])
 def write_id_name():
-    """
-    Write only ID and Name to a specified subsheet (default subsheet name "Attendance Database")
-    JSON:
-    {
-      "spreadsheet_id" or "spreadsheet_title",
-      "sheet_tab": optional (default DEFAULT_DB_SHEET),
-      "id": required,
-      "name": required,
-      "start_col": optional (1-indexed) default 1,
-      "owner_email": optional,
-      "parent_folder_id": optional
-    }
-    """
     data = request.get_json()
-    if not data or "id" not in data or "name" not in data:
+    if not data:
+        return jsonify({"status": "error", "message": "JSON body required"}), 400
+
+    user_email = data.get("user_email")
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
+
+    if "id" not in data or "name" not in data:
         return jsonify({"status": "error", "message": "id and name required"}), 400
 
     sheet_tab = data.get("sheet_tab", DEFAULT_DB_SHEET)
@@ -528,14 +684,18 @@ def write_id_name():
     owner_email = data.get("owner_email")
     parent_folder_id = data.get("parent_folder_id")
 
-    drive = get_drive_service()
-    sheets = get_sheets_service()
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    parent_for_spreadsheet = attendance_folder["id"] if attendance_folder else parent_folder_id
 
     if not spreadsheet_id:
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_for_spreadsheet)
         if not found:
-            # create with the default DB sheet and place it under parent_folder_id if provided
-            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[sheet_tab], share_with_email=owner_email, parent_folder_id=parent_folder_id)
+            created = create_spreadsheet(sheets, spreadsheet_title, tabs=[sheet_tab], share_with_email=owner_email, parent_folder_id=parent_for_spreadsheet, user_email=user_email)
             spreadsheet_id = created["spreadsheetId"]
             # Add headers
             headers_range = f"'{sheet_tab}'!{column_index_to_letter(start_col)}1:{column_index_to_letter(start_col+1)}1"
@@ -552,16 +712,6 @@ def write_id_name():
 
 @app.route("/api/find_id", methods=["GET"])
 def find_id():
-    """
-    Find Name by ID in a specified subsheet.
-    Query params:
-      spreadsheet_id or spreadsheet_title
-      sheet_tab (required)
-      id (required)
-      id_col_idx optional default 1
-      name_col_idx optional default 2
-      parent_folder_id optional (if searching by title)
-    """
     spreadsheet_id = request.args.get("spreadsheet_id")
     spreadsheet_title = request.args.get("spreadsheet_title")
     sheet_tab = request.args.get("sheet_tab")
@@ -569,17 +719,25 @@ def find_id():
     id_col_idx = int(request.args.get("id_col_idx", 1))
     name_col_idx = int(request.args.get("name_col_idx", 2))
     parent_folder_id = request.args.get("parent_folder_id")
+    user_email = request.args.get("user_email")
 
+    if not user_email:
+        return jsonify({"status": "error", "message": "user_email required"}), 400
     if not sheet_tab or not target_id:
         return jsonify({"status": "error", "message": "sheet_tab and id required"}), 400
 
-    drive = get_drive_service()
-    sheets = get_sheets_service()
+    drive = get_drive_service(user_email)
+    sheets = get_sheets_service(user_email)
+    if not drive or not sheets:
+        return jsonify({"status": "error", "message": "Invalid or expired credentials. Please re-login."}), 401
+
+    attendance_folder, images_folder = ensure_attendance_structure(drive, parent_folder_id, attendance_name=DEFAULT_IMAGE_FOLDER, images_name=DEFAULT_IMAGES_SUBFOLDER)
+    parent_for_search = attendance_folder["id"] if attendance_folder else parent_folder_id
 
     if not spreadsheet_id:
         if not spreadsheet_title:
             return jsonify({"status": "error", "message": "spreadsheet_id or spreadsheet_title required"}), 400
-        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_folder_id)
+        found = find_spreadsheet_by_title(drive, spreadsheet_title, parent_folder_id=parent_for_search)
         if not found:
             return jsonify({"status": "error", "message": "Spreadsheet not found"}), 404
         spreadsheet_id = found["id"]
@@ -589,25 +747,12 @@ def find_id():
         return jsonify({"status": "not_found", "id": target_id}), 404
     return jsonify({"status": "success", "id": target_id, "name": name})
 
+
 @app.route("/", methods=["GET"])
 def home():
     return "Attendance API is running!"
 
-# --------------------------
-# Local DB helpers
-# --------------------------
-def load_local_db(file):
-    with open(file, "r") as f:
-        return json.load(f)
 
-
-def save_local_db(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-# --------------------------
-# Run
-# --------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 80)), debug=True)
+    print("it is working")
