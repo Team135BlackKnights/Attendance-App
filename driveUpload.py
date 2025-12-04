@@ -6,11 +6,12 @@ import os
 
 
 # API File Path, Change this depending on your API file.
-APIPath = "C:/Users/Penn Robotics/Downloads/robotics-attendance-447321-ca10f1c31867.json"
+APIPath = "C:/Users/pizza/Downloads/robotics-attendance-447321-ca10f1c31867(1).json"
+defaultDoc = "Internship Attendance Sheet"
 
 
 # Setup Google Sheets API
-def setup_google_sheet(document = "Internship Attendance Sheet") :
+def setup_google_sheet(document = defaultDoc) :
     # Change this to your sheet's name ^
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
@@ -25,7 +26,13 @@ def setup_google_drive():
     drive_service = build('drive', 'v3', credentials=creds)
     return drive_service
 
-    
+def list_sheets(document = defaultDoc):
+    spreadsheet = setup_google_sheet(document)
+    worksheets = spreadsheet.worksheets()   # list of Worksheet objects
+    sheet_names = [ws.title for ws in worksheets]
+    return sheet_names
+
+
 # Set file permissions to make it publicly accessible
 def make_file_public(drive_service, file_id):
     permission = {
