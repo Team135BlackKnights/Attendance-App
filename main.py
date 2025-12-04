@@ -66,7 +66,8 @@ if len(volunteeringList) >= 2:
 # UI state variables (can be toggled via Options)
 # --------------------------
 ui_theme = "Light"   # "Light" or "Dark"
-tablet_mode = False  # if True, use larger fonts/layout
+main_ui_scale = 1.0  # Scale multiplier for main UI (0.5 - 2.0)
+whos_here_scale = 1.0  # Scale multiplier for Who's Here window (0.5 - 2.0)
 
 # --------------------------
 # Theme definitions
@@ -148,6 +149,35 @@ def center_and_fit(window, inner_widget, pad_x=60, pad_y=60, max_width=None, max
     final_h = min(req_h, max_height)
     center_window(window, width=final_w, height=final_h)
 
+
+def adjust_all_toplevels_to_scale():
+    """Attempt to resize all open Toplevel windows to fit their content.
+
+    This finds the first Frame child inside each Toplevel and calls
+    `center_and_fit` so dialogs/popup windows expand to accommodate font scaling.
+    """
+    try:
+        for w in root.winfo_children():
+            try:
+                # Some platforms return strings; be defensive
+                if getattr(w, 'winfo_class', lambda: '')() == 'Toplevel' or isinstance(w, tk.Toplevel):
+                    # find a suitable inner widget (card) to size to
+                    inner = None
+                    for c in w.winfo_children():
+                        if isinstance(c, tk.Frame):
+                            inner = c
+                            break
+                    if inner is not None:
+                        try:
+                            inner.update_idletasks()
+                            center_and_fit(w, inner, pad_x=80, pad_y=80)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 # --------------------------
 # Fonts
 # --------------------------
@@ -156,19 +186,14 @@ tk_font_medium = None
 tk_font_smedium = None
 tk_font_small = None
 
-# Create and assign font sizes based on tablet_mode.
+# Create and assign font sizes based on main_ui_scale.
 def create_fonts():
     global tk_font_large, tk_font_medium, tk_font_smedium, tk_font_small
-    if tablet_mode:
-        tk_font_large = font.Font(family="Poppins", size=56)
-        tk_font_medium = font.Font(family="Poppins", size=42)
-        tk_font_smedium = font.Font(family="Poppins", size=34)
-        tk_font_small = font.Font(family="Poppins", size=22)
-    else:
-        tk_font_large = font.Font(family="Poppins", size=48)
-        tk_font_medium = font.Font(family="Poppins", size=36)
-        tk_font_smedium = font.Font(family="Poppins", size=28)
-        tk_font_small = font.Font(family="Poppins", size=18)
+    # Base sizes scaled by main_ui_scale (0.5 - 2.0)
+    tk_font_large = font.Font(family="Poppins", size=int(48 * main_ui_scale))
+    tk_font_medium = font.Font(family="Poppins", size=int(36 * main_ui_scale))
+    tk_font_smedium = font.Font(family="Poppins", size=int(28 * main_ui_scale))
+    tk_font_small = font.Font(family="Poppins", size=int(18 * main_ui_scale))
 
 # --------------------------
 # Styling: entries & optionmenus helpers
@@ -197,12 +222,6 @@ def style_entry(entry):
                         bd=0, relief="flat", font=tk_font_small,
                         highlightthickness=thick, highlightbackground=CARD_BORDER, highlightcolor=ACCENT)
         entry.configure(justify="center")
-        # Try to add some internal padding on platforms that permit it:
-        try:
-            entry_ipady = 8 if not tablet_mode else 12
-            # ipady must be set when packing; set a small internal height by configuring 'ipady' during pack in creation sites
-        except Exception:
-            pass
     except Exception:
         pass
 
@@ -307,6 +326,48 @@ def apply_ui_settings():
 # --------------------------
 # Core logic functions 
 # --------------------------
+
+# Global dictionary to track current signed-in people.
+# Keys: person's name (string) -> value: sign-in timestamp string (e.g. "03:24 PM, 2025-12-04")
+sign_ins = {}
+
+# Track the currently-open "Who's Here" window and its after() id so we can
+# avoid multiple pollers and cancel polling when the window closes.
+whos_here_win = None
+whos_here_after_id = None
+whos_here_populate_func = None  # Reference to populate function for manual refresh
+
+def add_sign_in(name, timestamp_str):
+    """Add or update a person's sign-in time in the global tracking dict."""
+    try:
+        sign_ins[name] = timestamp_str
+    except Exception:
+        pass
+
+def remove_sign_in(name):
+    """Remove a person from the global tracking dict if present."""
+    try:
+        sign_ins.pop(name, None)
+    except Exception:
+        pass
+
+def get_current_signins():
+    """Return a shallow copy of current sign-ins.
+
+    Returns:
+        dict: name -> timestamp string
+    """
+    return dict(sign_ins)
+
+def refresh_whos_here_window():
+    """Manually trigger a refresh of the Who's Here window if it's open."""
+    global whos_here_win, whos_here_populate_func
+    try:
+        if whos_here_win is not None and whos_here_win.winfo_exists() and whos_here_populate_func is not None:
+            whos_here_populate_func()
+    except Exception:
+        pass
+
 
 # Validate the ID entry, fetch the name from DB, and either prompt for name or take picture+record attendance.
 def scan_id(event=None):
@@ -489,6 +550,17 @@ def process_attendance(current_id, name, hasPic = True):
 
     full_date = f"Signed {action} at: {formatted_time}, Date: {formatted_date}"
     writeData(current_id, name, full_date, reason)
+
+    # Update global sign-ins tracking: add on sign in, remove on sign out
+    try:
+        if action == "in":
+            add_sign_in(name, f"{formatted_time}, {formatted_date}")
+        else:
+            remove_sign_in(name)
+        # Trigger manual refresh of Who's Here window if open
+        refresh_whos_here_window()
+    except Exception:
+        pass
 
     load = open_loading_window()
     if (hasPic):
@@ -743,6 +815,12 @@ options_btn = tk.Button(header, text="⚙️ Options", command=lambda: open_opti
                         font=tk_font_small, bd=0, activebackground="#0B63C7")
 options_btn.pack(side="right", padx=16, pady=12)
 
+# Who's Here button
+tracking_btn = tk.Button(header, text="Who's here?", command=lambda: open_whos_here_window(), bg="#FFFFFF", fg="#1F2D3D",
+                        font=tk_font_small, bd=0, activebackground="#0B63C7")
+tracking_btn.pack(side="right", padx=16, pady=12)
+
+
 # Main panel
 main_card = tk.Frame(root, bg="#FFFFFF", bd=1, relief="solid")
 main_card.pack(expand=True, padx=24, pady=12, ipadx=10, ipady=10)
@@ -802,34 +880,226 @@ footer_label = Label(footer, text="Tip: Press Esc to exit fullscreen.", font=tk_
 footer_label.pack(side="left", padx=6, pady=6)
 
 # --------------------------
-# Options dialog (UI only)
+# "Who's Here" dialog: show currently signed-in people (freely resizable with scrollable list)
+def open_whos_here_window():
+    global whos_here_win, whos_here_after_id, whos_here_populate_func
+
+    # If window already open, just lift it and return
+    try:
+        if whos_here_win is not None and whos_here_win.winfo_exists():
+            whos_here_win.lift()
+            return
+    except Exception:
+        whos_here_win = None
+
+    win = Toplevel(root)
+    whos_here_win = win
+    win.title("Who's Here?")
+    win.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"]) 
+    win.focus_force()
+    # Set initial size and allow resizing
+    win.geometry("520x420")
+    win.resizable(True, True)
+
+    # Main container uses pack to fill window dynamically
+    container = tk.Frame(win, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
+    container.pack(fill="both", expand=True, padx=20, pady=20)
+    try:
+        container.configure(highlightbackground=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"])
+    except Exception:
+        pass
+
+    # Header label with scaled font
+    def get_header_font():
+        return font.Font(family="Poppins", size=max(10, int(28 * whos_here_scale)))
+    
+    header_label = Label(container, text="Currently Signed In:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=get_header_font())
+    header_label.pack(pady=(12, 8))
+
+    # Scrollable list area
+    list_container = tk.Frame(container, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+    list_container.pack(fill="both", expand=True, padx=12, pady=(4, 8))
+
+    canvas = tk.Canvas(list_container, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=0, highlightthickness=0)
+    scrollbar = tk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    def populate():
+        # Build fonts dynamically so changes to `whos_here_scale` take effect immediately
+        wh_font_small = font.Font(family="Poppins", size=max(8, int(18 * whos_here_scale)))
+        
+        # Clear existing widgets
+        for w in scrollable_frame.winfo_children():
+            w.destroy()
+        
+        current = get_current_signins()
+        if not current:
+            Label(scrollable_frame, text="No one is currently signed in.", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"], font=wh_font_small).pack(pady=8, padx=8)
+            return
+        
+        # Adjust wraplength based on canvas width
+        try:
+            canvas.update_idletasks()
+            avail_w = max(200, canvas.winfo_width() - 40)
+        except Exception:
+            avail_w = 400
+        
+        # Sort by timestamp and create labels
+        for name, ts in sorted(current.items(), key=lambda x: x[1]):
+            Label(scrollable_frame, text=f"{name} — Signed in at {ts}", anchor="w", justify="left", 
+                  bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+                  fg=TEXT if TEXT else THEMES["Light"]["TEXT"], 
+                  font=wh_font_small, wraplength=avail_w).pack(fill="x", padx=8, pady=4)
+        
+        # Update header font as well
+        header_label.config(font=get_header_font())
+    
+    # Store populate function globally for manual refresh
+    whos_here_populate_func = populate
+
+    def _poll():
+        # refresh contents
+        try:
+            populate()
+        except Exception:
+            pass
+        # schedule next poll if window still exists (60s interval)
+        global whos_here_after_id
+        try:
+            if whos_here_win is not None and whos_here_win.winfo_exists():
+                whos_here_after_id = root.after(60000, _poll)
+            else:
+                whos_here_after_id = None
+        except Exception:
+            whos_here_after_id = None
+
+    def _cleanup_and_close():
+        global whos_here_win, whos_here_after_id, whos_here_populate_func
+        try:
+            if whos_here_after_id is not None:
+                root.after_cancel(whos_here_after_id)
+        except Exception:
+            pass
+        whos_here_after_id = None
+        try:
+            if whos_here_win is not None and whos_here_win.winfo_exists():
+                whos_here_win.destroy()
+        except Exception:
+            pass
+        whos_here_win = None
+        whos_here_populate_func = None
+
+    # Button row at bottom
+    try:
+        wh_font_small_btn = font.Font(family="Poppins", size=max(8, int(18 * whos_here_scale)))
+    except Exception:
+        wh_font_small_btn = tk_font_small
+    
+    btn_row = tk.Frame(container, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"]) 
+    btn_row.pack(fill="x", pady=(6, 12), padx=12)
+    refresh_btn = tk.Button(btn_row, text="Refresh", command=populate, bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white", bd=0, font=wh_font_small_btn, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], padx=12, pady=6)
+    refresh_btn.pack(side="left")
+    close_btn = tk.Button(btn_row, text="Close", command=_cleanup_and_close, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], bd=0, font=wh_font_small_btn, padx=12, pady=6)
+    close_btn.pack(side="right")
+
+    # Ensure cleanup when user closes the window via window manager
+    win.protocol("WM_DELETE_WINDOW", _cleanup_and_close)
+
+    # Debounced resize handling: adjust canvas window width and repopulate
+    resize_after = None
+    def _on_resize(event=None):
+        nonlocal resize_after
+        try:
+            if resize_after is not None:
+                root.after_cancel(resize_after)
+        except Exception:
+            pass
+        def _do_resize():
+            try:
+                # Match canvas window width to canvas width
+                canvas.update_idletasks()
+                canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+                populate()
+            except Exception:
+                pass
+        resize_after = root.after(150, _do_resize)
+    
+    win.bind('<Configure>', _on_resize)
+
+    # initial populate and start polling
+    populate()
+    # start poll loop (60s interval)
+    whos_here_after_id = root.after(60000, _poll)
+
+# --------------------------
+# Options dialog 
 # --------------------------
 
-# Open the Options dialog: toggle tablet mode & theme and apply them to the UI.
+# Open the Options dialog with scrollable canvas and scale sliders
 def open_options_window():
     opts = Toplevel(root)
     opts.title("Options")
-    opts.resizable(True, True)
     opts.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
     opts.focus_force()
+    center_window(opts, width=750, height=500)
 
+    # Outer card frame
     card = tk.Frame(opts, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
-    card.place(relx=0.5, rely=0.5, anchor="center")
+    card.pack(fill="both", expand=True, padx=20, pady=20)
     try:
         card.configure(highlightbackground=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"])
     except Exception:
         pass
 
-    tablet_var = BooleanVar(value=tablet_mode)
-    tablet_row = tk.Frame(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
-    tablet_row.pack(fill="x", pady=(16, 6), padx=18)
-    tk.Label(tablet_row, text="Tablet Mode (larger UI):", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(side="left")
-    tablet_chk = Checkbutton(tablet_row, variable=tablet_var, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], selectcolor=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
-    tablet_chk.pack(side="right")
+    # Canvas for scrolling
+    canvas = tk.Canvas(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=0, highlightthickness=0)
+    scrollbar = tk.Scrollbar(card, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
 
-    tk.Label(card, text="Theme:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(10, 4))
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+    scrollbar.pack(side="right", fill="y", pady=10, padx=(0, 10))
+
+    # When the options window is resized, ensure the embedded window width follows
+    resize_after_opts = None
+    def _on_opts_resize(event=None):
+        nonlocal resize_after_opts
+        try:
+            if resize_after_opts is not None:
+                root.after_cancel(resize_after_opts)
+        except Exception:
+            pass
+        def _do():
+            try:
+                canvas.itemconfig(window_id, width=canvas.winfo_width())
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+        resize_after_opts = root.after(120, _do)
+    opts.bind('<Configure>', _on_opts_resize)
+
+    # Theme selector
+    tk.Label(scrollable_frame, text="Theme:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(16, 4))
     theme_var_local = StringVar(value=ui_theme)
-    theme_menu = OptionMenu(card, theme_var_local, "Light", "Dark")
+    theme_menu = OptionMenu(scrollable_frame, theme_var_local, "Light", "Dark")
     theme_menu.configure(font=tk_font_small, bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"], fg=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"], bd=0, relief="flat")
     try:
         theme_menu["menu"].configure(bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"],
@@ -838,33 +1108,65 @@ def open_options_window():
                                      activeforeground=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"])
     except Exception:
         pass
-    theme_menu.pack(anchor="w", padx=18)
+    theme_menu.pack(anchor="w", padx=18, pady=(0, 12))
 
+    # Main UI Scale slider
+    tk.Label(scrollable_frame, text="Main UI Scale (0.5x - 2.0x):", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(10, 4))
+    main_scale_var = tk.DoubleVar(value=main_ui_scale)
+    main_scale_label = tk.Label(scrollable_frame, text=f"{main_ui_scale:.2f}x", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small)
+    main_scale_label.pack(anchor="w", padx=18)
+    
+    def update_main_scale_label(val):
+        main_scale_label.config(text=f"{float(val):.2f}x")
+    
+    main_scale_slider = tk.Scale(scrollable_frame, from_=0.5, to=2.0, resolution=0.1, orient="horizontal", variable=main_scale_var, 
+                                 command=update_main_scale_label, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+                                 fg=TEXT if TEXT else THEMES["Light"]["TEXT"], highlightthickness=0, troughcolor=ACCENT if ACCENT else THEMES["Light"]["ACCENT"])
+    main_scale_slider.pack(fill="x", padx=18, pady=(0, 12))
+
+    # Who's Here Scale slider
+    tk.Label(scrollable_frame, text="Who's Here Scale (0.5x - 2.0x):", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(10, 4))
+    whos_here_scale_var = tk.DoubleVar(value=whos_here_scale)
+    whos_here_scale_label = tk.Label(scrollable_frame, text=f"{whos_here_scale:.2f}x", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small)
+    whos_here_scale_label.pack(anchor="w", padx=18)
+    
+    def update_whos_here_scale_label(val):
+        whos_here_scale_label.config(text=f"{float(val):.2f}x")
+    
+    whos_here_scale_slider = tk.Scale(scrollable_frame, from_=0.5, to=2.0, resolution=0.1, orient="horizontal", variable=whos_here_scale_var,
+                                      command=update_whos_here_scale_label, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+                                      fg=TEXT if TEXT else THEMES["Light"]["TEXT"], highlightthickness=0, troughcolor=ACCENT if ACCENT else THEMES["Light"]["ACCENT"])
+    whos_here_scale_slider.pack(fill="x", padx=18, pady=(0, 20))
+
+    # Buttons at bottom of card (not in scrollable area)
     btn_frame = tk.Frame(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
-    btn_frame.pack(fill="x", pady=(18, 8), padx=18)
+    btn_frame.pack(fill="x", pady=(0, 10), padx=18)
+    
     def apply_and_close(event_arg=None):
-        nonlocal theme_var_local, tablet_var
-        global ui_theme, tablet_mode
+        nonlocal theme_var_local, main_scale_var, whos_here_scale_var
+        global ui_theme, main_ui_scale, whos_here_scale
         ui_theme = theme_var_local.get()
-        tablet_mode = tablet_var.get()
+        main_ui_scale = main_scale_var.get()
+        whos_here_scale = whos_here_scale_var.get()
         apply_ui_settings()
+        # Trigger manual refresh of Who's Here window if open
+        refresh_whos_here_window()
+        # Adjust other open dialogs/windows to the new scale
+        try:
+            adjust_all_toplevels_to_scale()
+        except Exception:
+            pass
         opts.destroy()
+    
     apply_btn = tk.Button(btn_frame, text="Apply", command=apply_and_close, bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white",
                           font=tk_font_small, bd=0, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], padx=12, pady=8)
     apply_btn.pack(side="right")
     close_btn = tk.Button(btn_frame, text="Close", command=lambda: opts.destroy(), bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
-                          font=tk_font_small, bd=0)
+                          font=tk_font_small, bd=0, padx=12, pady=8)
     close_btn.pack(side="right", padx=(0, 8))
 
-    # Bind Enter to apply (so Enter works for Options dialog)
+    # Bind Enter to apply
     opts.bind("<Return>", lambda e: apply_and_close())
-
-    # size card to content and center
-    card.update_idletasks()
-    card_width = max(card.winfo_reqwidth(), 340)
-    card_height = max(card.winfo_reqheight(), 160)
-    card.place_configure(width=card_width, height=card_height)
-    center_and_fit(opts, card, pad_x=80, pad_y=80)
 
 # Apply UI settings once widgets exist
 apply_ui_settings()
