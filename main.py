@@ -15,6 +15,8 @@ from tkinter import font
 import gspread
 import time
 import threading
+import random
+import json
 
 # --- Begin: Embedding Poppins (runtime only) --------------------------------
 # Purpose: when packaged with PyInstaller, the font file will be extracted into
@@ -337,6 +339,55 @@ whos_here_win = None
 whos_here_after_id = None
 whos_here_populate_func = None  # Reference to populate function for manual refresh
 
+# Camera settings: frequency is probability (0.05 - 1.0) that a picture is taken when camera is enabled.
+# camera_trigger controls whether camera is used on sign in, sign out, or both.
+camera_frequency = 1.0
+camera_trigger = "both"  # one of: "in", "out", "both"
+
+# Settings persistence
+DEFAULT_SETTINGS = {
+    "ui_theme": "Light",
+    "main_ui_scale": 1.0,
+    "whos_here_scale": 1.0,
+    "camera_frequency": 1.0,
+    "camera_trigger": "both"
+}
+
+SETTINGS_FILE = os.path.join(_get_base_path(), "settings.json")
+
+def save_settings():
+    data = {
+        "ui_theme": ui_theme,
+        "main_ui_scale": main_ui_scale,
+        "whos_here_scale": whos_here_scale,
+        "camera_frequency": camera_frequency,
+        "camera_trigger": camera_trigger
+    }
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+def load_settings():
+    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            ui_theme = data.get("ui_theme", DEFAULT_SETTINGS["ui_theme"])
+            main_ui_scale = float(data.get("main_ui_scale", DEFAULT_SETTINGS["main_ui_scale"]))
+            whos_here_scale = float(data.get("whos_here_scale", DEFAULT_SETTINGS["whos_here_scale"]))
+            camera_frequency = float(data.get("camera_frequency", DEFAULT_SETTINGS["camera_frequency"]))
+            camera_trigger = data.get("camera_trigger", DEFAULT_SETTINGS["camera_trigger"])
+    except Exception:
+        # on error, fall back to defaults
+        ui_theme = DEFAULT_SETTINGS["ui_theme"]
+        main_ui_scale = DEFAULT_SETTINGS["main_ui_scale"]
+        whos_here_scale = DEFAULT_SETTINGS["whos_here_scale"]
+        camera_frequency = DEFAULT_SETTINGS["camera_frequency"]
+        camera_trigger = DEFAULT_SETTINGS["camera_trigger"]
+
 def add_sign_in(name, timestamp_str):
     """Add or update a person's sign-in time in the global tracking dict."""
     try:
@@ -475,6 +526,38 @@ def take_picture_and_record(window, current_id, name):
     folder = f"images/{current_id}-{name}"
     if not os.path.isdir(folder):
         os.makedirs(folder)
+
+    # Decide whether to attempt taking a picture based on camera settings
+    try:
+        global camera_frequency, camera_trigger
+        action = action_var.get()
+        camera_enabled_for_action = (camera_trigger == "both") or (camera_trigger == action)
+    except Exception:
+        camera_enabled_for_action = True
+
+    # If camera is not enabled for this action, skip taking picture
+    if not camera_enabled_for_action:
+        try:
+            window.destroy()
+        except Exception:
+            pass
+        process_attendance(current_id, name, hasPic=False)
+        return
+
+    # Camera is enabled for this action; apply probabilistic frequency
+    try:
+        p = float(camera_frequency)
+    except Exception:
+        p = 1.0
+
+    # If random test fails, skip taking picture
+    if p < 1.0 and random.random() > p:
+        try:
+            window.destroy()
+        except Exception:
+            pass
+        process_attendance(current_id, name, hasPic=False)
+        return
 
     file_date = now.strftime("%I-%M-%p-%Y-%m-%d")
     global picName
@@ -801,6 +884,8 @@ root.attributes("-fullscreen", True)
 root.bind("<Escape>", lambda event: root.attributes("-fullscreen", False))
 
 # Initialize fonts (so widgets can use them)
+# Load saved settings (if present) before creating fonts so scale is applied
+load_settings()
 load_private_font(os.path.join("fonts", "Poppins-Regular.ttf"))
 create_fonts()
 
@@ -1052,7 +1137,7 @@ def open_options_window():
     opts.title("Options")
     opts.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
     opts.focus_force()
-    center_window(opts, width=750, height=500)
+    center_window(opts, width=1050, height=500)
 
     # Outer card frame
     card = tk.Frame(opts, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
@@ -1138,16 +1223,90 @@ def open_options_window():
                                       fg=TEXT if TEXT else THEMES["Light"]["TEXT"], highlightthickness=0, troughcolor=ACCENT if ACCENT else THEMES["Light"]["ACCENT"])
     whos_here_scale_slider.pack(fill="x", padx=18, pady=(0, 20))
 
+    # Camera frequency slider (probability from 1/20 to 1)
+    tk.Label(scrollable_frame, text="Camera Frequency (1/20 - 1.0):", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(6, 4))
+    camera_freq_var = tk.DoubleVar(value=camera_frequency)
+    camera_freq_label = tk.Label(scrollable_frame, text=f"Every 1 in {int(round(1.0/camera_frequency))} (p={camera_frequency:.2f})", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small)
+    camera_freq_label.pack(anchor="w", padx=18)
+
+    def update_camera_freq_label(val):
+        try:
+            v = float(val)
+            denom = int(round(1.0 / v)) if v > 0 else 999
+            denom = max(1, min(999, denom))
+            camera_freq_label.config(text=f"Every 1 in {denom} (p={v:.2f})")
+        except Exception:
+            camera_freq_label.config(text=str(val))
+
+    camera_freq_slider = tk.Scale(scrollable_frame, from_=0.05, to=1.0, resolution=0.05, orient="horizontal", variable=camera_freq_var, command=update_camera_freq_label, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], highlightthickness=0, troughcolor=ACCENT if ACCENT else THEMES["Light"]["ACCENT"])
+    camera_freq_slider.pack(fill="x", padx=18, pady=(0, 12))
+
+    # Camera trigger: sign in / sign out / both
+    tk.Label(scrollable_frame, text="Camera Trigger:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(6, 4))
+    camera_trigger_var = tk.StringVar(value=camera_trigger)
+    trigger_frame = tk.Frame(scrollable_frame, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+    trigger_frame.pack(anchor="w", padx=18, pady=(0, 12))
+    tk.Radiobutton(trigger_frame, text="Sign In", variable=camera_trigger_var, value="in", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(0, 8))
+    tk.Radiobutton(trigger_frame, text="Sign Out", variable=camera_trigger_var, value="out", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(0, 8))
+    tk.Radiobutton(trigger_frame, text="Both", variable=camera_trigger_var, value="both", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left")
+    tk.Radiobutton(trigger_frame, text="Never", variable=camera_trigger_var, value="never", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(8,0))
+
     # Buttons at bottom of card (not in scrollable area)
     btn_frame = tk.Frame(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
     btn_frame.pack(fill="x", pady=(0, 10), padx=18)
-    
+    def reset_to_defaults():
+        nonlocal theme_var_local, main_scale_var, whos_here_scale_var, camera_freq_var, camera_trigger_var
+        global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger
+        # confirm with the user before resetting
+        try:
+            if not messagebox.askyesno("Reset Defaults", "Are you sure you want to reset all settings to defaults? This will overwrite your current settings."):
+                return
+        except Exception:
+            # if messagebox fails for any reason, proceed conservatively by not resetting
+            return
+
+        # apply defaults to globals
+        ui_theme = DEFAULT_SETTINGS["ui_theme"]
+        main_ui_scale = DEFAULT_SETTINGS["main_ui_scale"]
+        whos_here_scale = DEFAULT_SETTINGS["whos_here_scale"]
+        camera_frequency = DEFAULT_SETTINGS["camera_frequency"]
+        camera_trigger = DEFAULT_SETTINGS["camera_trigger"]
+
+        # update local controls
+        try:
+            theme_var_local.set(ui_theme)
+            main_scale_var.set(main_ui_scale)
+            main_scale_label.config(text=f"{main_ui_scale:.2f}x")
+            whos_here_scale_var.set(whos_here_scale)
+            whos_here_scale_label.config(text=f"{whos_here_scale:.2f}x")
+            camera_freq_var.set(camera_frequency)
+            update_camera_freq_label(camera_frequency)
+            camera_trigger_var.set(camera_trigger)
+        except Exception:
+            pass
+
+        # apply and save
+        try:
+            apply_ui_settings()
+            save_settings()
+            refresh_whos_here_window()
+            adjust_all_toplevels_to_scale()
+        except Exception:
+            pass
+
     def apply_and_close(event_arg=None):
-        nonlocal theme_var_local, main_scale_var, whos_here_scale_var
-        global ui_theme, main_ui_scale, whos_here_scale
+        nonlocal theme_var_local, main_scale_var, whos_here_scale_var, camera_freq_var, camera_trigger_var
+        global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger
         ui_theme = theme_var_local.get()
         main_ui_scale = main_scale_var.get()
         whos_here_scale = whos_here_scale_var.get()
+        # camera settings
+        try:
+            camera_frequency = float(camera_freq_var.get())
+        except Exception:
+            camera_frequency = 1.0
+        camera_trigger = camera_trigger_var.get()
+
         apply_ui_settings()
         # Trigger manual refresh of Who's Here window if open
         refresh_whos_here_window()
@@ -1156,11 +1315,18 @@ def open_options_window():
             adjust_all_toplevels_to_scale()
         except Exception:
             pass
+        # Save settings to disk
+        try:
+            save_settings()
+        except Exception:
+            pass
         opts.destroy()
     
     apply_btn = tk.Button(btn_frame, text="Apply", command=apply_and_close, bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white",
                           font=tk_font_small, bd=0, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], padx=12, pady=8)
     apply_btn.pack(side="right")
+    reset_btn = tk.Button(btn_frame, text="Reset Defaults", command=reset_to_defaults, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small, bd=0, padx=12, pady=8)
+    reset_btn.pack(side="left")
     close_btn = tk.Button(btn_frame, text="Close", command=lambda: opts.destroy(), bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
                           font=tk_font_small, bd=0, padx=12, pady=8)
     close_btn.pack(side="right", padx=(0, 8))

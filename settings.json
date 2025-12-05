@@ -1,0 +1,7 @@
+{
+  "ui_theme": "Light",
+  "main_ui_scale": 1.0,
+  "whos_here_scale": 1.0,
+  "camera_frequency": 1.0,
+  "camera_trigger": "both"
+}
