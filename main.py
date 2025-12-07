@@ -344,13 +344,36 @@ whos_here_populate_func = None  # Reference to populate function for manual refr
 camera_frequency = 1.0
 camera_trigger = "both"  # one of: "in", "out", "both"
 
+# Keyboardless mode settings
+keyboardless_mode = False
+keyboardless_bindings = {
+    "sign_in": "",
+    "sign_out": "",
+    "internship": "",
+    "build_season": "",
+    "volunteering": "",
+    "next_option": "",
+    "prev_option": "",
+    "close_popup": ""
+}
+
 # Settings persistence
 DEFAULT_SETTINGS = {
     "ui_theme": "Light",
     "main_ui_scale": 1.0,
     "whos_here_scale": 1.0,
     "camera_frequency": 1.0,
-    "camera_trigger": "both"
+    "camera_trigger": "both",
+    "keyboardless_bindings": {
+        "sign_in": "",
+        "sign_out": "",
+        "internship": "",
+        "build_season": "",
+        "volunteering": "",
+        "next_option": "",
+        "prev_option": "",
+        "close_popup": ""
+    }
 }
 
 SETTINGS_FILE = os.path.join(_get_base_path(), "settings.json")
@@ -361,7 +384,8 @@ def save_settings():
         "main_ui_scale": main_ui_scale,
         "whos_here_scale": whos_here_scale,
         "camera_frequency": camera_frequency,
-        "camera_trigger": camera_trigger
+        "camera_trigger": camera_trigger,
+        "keyboardless_bindings": keyboardless_bindings
     }
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -370,7 +394,7 @@ def save_settings():
         pass
 
 def load_settings():
-    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger
+    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_bindings
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -380,6 +404,7 @@ def load_settings():
             whos_here_scale = float(data.get("whos_here_scale", DEFAULT_SETTINGS["whos_here_scale"]))
             camera_frequency = float(data.get("camera_frequency", DEFAULT_SETTINGS["camera_frequency"]))
             camera_trigger = data.get("camera_trigger", DEFAULT_SETTINGS["camera_trigger"])
+            keyboardless_bindings = data.get("keyboardless_bindings", DEFAULT_SETTINGS["keyboardless_bindings"].copy())
     except Exception:
         # on error, fall back to defaults
         ui_theme = DEFAULT_SETTINGS["ui_theme"]
@@ -387,6 +412,7 @@ def load_settings():
         whos_here_scale = DEFAULT_SETTINGS["whos_here_scale"]
         camera_frequency = DEFAULT_SETTINGS["camera_frequency"]
         camera_trigger = DEFAULT_SETTINGS["camera_trigger"]
+        keyboardless_bindings = DEFAULT_SETTINGS["keyboardless_bindings"].copy()
 
 def add_sign_in(name, timestamp_str):
     """Add or update a person's sign-in time in the global tracking dict."""
@@ -735,6 +761,53 @@ def volunteering_event_window():
     new_window.bind("<Return>", lambda e: returnEvent())
     eventDropdown.bind("<Return>", lambda e: returnEvent())
 
+    # Keyboardless mode: create a hidden entry for input handling and navigation
+    if keyboardless_mode:
+        hidden_entry = Entry(card, font=tk_font_small, bd=0, bg=INPUT_BG)
+        hidden_entry.pack(pady=5, ipadx=6, ipady=8)
+        style_entry(hidden_entry)
+        hidden_entry.focus()
+        
+        current_index = [0]  # Use list to allow modification in nested function
+        
+        def cycle_to_next():
+            if len(volunteeringList) > 0:
+                current_index[0] = (current_index[0] + 1) % len(volunteeringList)
+                volunteering_var.set(volunteeringList[current_index[0]])
+        
+        def cycle_to_prev():
+            if len(volunteeringList) > 0:
+                current_index[0] = (current_index[0] - 1) % len(volunteeringList)
+                volunteering_var.set(volunteeringList[current_index[0]])
+        
+        def keyboardless_volunteering_handler(event=None):
+            current_input = hidden_entry.get().strip()
+            if current_input == keyboardless_bindings.get("next_option"):
+                cycle_to_next()
+                hidden_entry.delete(0, tk.END)
+            elif current_input == keyboardless_bindings.get("prev_option"):
+                cycle_to_prev()
+                hidden_entry.delete(0, tk.END)
+            elif current_input == keyboardless_bindings.get("close_popup"):
+                hidden_entry.delete(0, tk.END)
+                new_window.destroy()
+            elif len(current_input) == 16:
+                # Check if it matches any other binding and clear if so
+                if current_input in [v for k, v in keyboardless_bindings.items() if v]:
+                    hidden_entry.delete(0, tk.END)
+        
+        hidden_entry.bind("<KeyRelease>", keyboardless_volunteering_handler)
+        
+        def refocus_hidden_entry():
+            if new_window.winfo_exists():
+                try:
+                    hidden_entry.focus_force()
+                    new_window.after(100, refocus_hidden_entry)
+                except Exception:
+                    pass
+        
+        refocus_hidden_entry()
+
     center_and_fit(new_window, card, pad_x=80, pad_y=80)
     root.wait_window(new_window)
     return event
@@ -823,9 +896,30 @@ def early_sign_out():
     reason_entry.bind("<Return>", lambda e: save_reason())
     reason_window.bind("<Return>", lambda e: save_reason())
 
+    # Keyboardless mode: force focus on entry and handle close popup binding
+    if keyboardless_mode:
+        def keyboardless_dialog_handler(event=None):
+            current_input = reason_entry.get().strip()
+            if current_input == keyboardless_bindings.get("close_popup"):
+                reason_entry.delete(0, tk.END)
+                reason_window.destroy()
+        
+        reason_entry.bind("<KeyRelease>", keyboardless_dialog_handler)
+        
+        def refocus_reason_entry():
+            if reason_window.winfo_exists():
+                try:
+                    reason_entry.focus_force()
+                    reason_window.after(100, refocus_reason_entry)
+                except Exception:
+                    pass
+        
+        refocus_reason_entry()
+
     center_and_fit(reason_window, card, pad_x=80, pad_y=80)
     root.wait_window(reason_window)
-    reason = "Early sign out: " + reason
+    if reason:
+        reason = "Early sign out: " + reason
     return reason
 
 # Ask user for a reason to late sign in; return the collected reason string.
@@ -865,9 +959,30 @@ def late_sign_in():
     reason_entry.bind("<Return>", lambda e: save_reason())
     reason_window.bind("<Return>", lambda e: save_reason())
 
+    # Keyboardless mode: force focus on entry and handle close popup binding
+    if keyboardless_mode:
+        def keyboardless_dialog_handler(event=None):
+            current_input = reason_entry.get().strip()
+            if current_input == keyboardless_bindings.get("close_popup"):
+                reason_entry.delete(0, tk.END)
+                reason_window.destroy()
+        
+        reason_entry.bind("<KeyRelease>", keyboardless_dialog_handler)
+        
+        def refocus_reason_entry():
+            if reason_window.winfo_exists():
+                try:
+                    reason_entry.focus_force()
+                    reason_window.after(100, refocus_reason_entry)
+                except Exception:
+                    pass
+        
+        refocus_reason_entry()
+
     center_and_fit(reason_window, card, pad_x=80, pad_y=80)
     root.wait_window(reason_window)
-    reason = "Late Sign In: " + reason
+    if reason:
+        reason = "Late Sign In: " + reason
     return reason
 
 # --------------------------
@@ -1128,6 +1243,289 @@ def open_whos_here_window():
     whos_here_after_id = root.after(60000, _poll)
 
 # --------------------------
+# Keyboardless Mode Functions
+# --------------------------
+
+def open_keyboardless_config_window():
+    """Open the configuration window for setting up keyboardless mode bindings."""
+    config_win = Toplevel(root)
+    config_win.title("Keyboardless Mode Configuration")
+    config_win.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
+    config_win.focus_force()
+    center_window(config_win, width=1800, height=700)
+
+    # Outer card frame
+    card = tk.Frame(config_win, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
+    card.pack(fill="both", expand=True, padx=20, pady=20)
+    try:
+        card.configure(highlightbackground=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"])
+    except Exception:
+        pass
+
+    # Canvas for scrolling
+    canvas = tk.Canvas(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=0, highlightthickness=0)
+    scrollbar = tk.Scrollbar(card, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+    scrollbar.pack(side="right", fill="y", pady=10, padx=(0, 10))
+
+    # When the config window is resized, ensure the embedded window width follows
+    resize_after_config = None
+    def _on_config_resize(event=None):
+        nonlocal resize_after_config
+        try:
+            if resize_after_config is not None:
+                root.after_cancel(resize_after_config)
+        except Exception:
+            pass
+        def _do():
+            try:
+                canvas.itemconfig(window_id, width=canvas.winfo_width())
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+        resize_after_config = root.after(120, _do)
+    config_win.bind('<Configure>', _on_config_resize)
+
+    # Title and instructions
+    tk.Label(scrollable_frame, text="Configure Keyboardless Mode Bindings", 
+             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+             fg=TEXT if TEXT else THEMES["Light"]["TEXT"], 
+             font=tk_font_medium).pack(anchor="w", padx=18, pady=(16, 4))
+    
+    tk.Label(scrollable_frame, text="Enter a unique 16-digit string for each action. These will be used with barcode scanners.", 
+             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+             fg=TEXT if TEXT else THEMES["Light"]["TEXT"], 
+             font=tk_font_small, wraplength=700).pack(anchor="w", padx=18, pady=(0, 16))
+
+    # Dictionary to hold entry widgets
+    entry_widgets = {}
+    
+    # Binding configurations
+    bindings_config = [
+        ("sign_in", "Sign In Action"),
+        ("sign_out", "Sign Out Action"),
+        ("internship", "Select Internship"),
+        ("build_season", "Select Build Season"),
+        ("volunteering", "Select Volunteering"),
+        ("next_option", "Next Option (Volunteering Dialog)"),
+        ("prev_option", "Previous Option (Volunteering Dialog)"),
+        ("close_popup", "Close Any Popup/Dialog")
+    ]
+    
+    for key, label in bindings_config:
+        frame = tk.Frame(scrollable_frame, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+        frame.pack(fill="x", padx=18, pady=8)
+        
+        tk.Label(frame, text=f"{label}:", 
+                bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+                fg=TEXT if TEXT else THEMES["Light"]["TEXT"], 
+                font=tk_font_small).pack(anchor="w", pady=(0, 4))
+        
+        entry = Entry(frame, font=tk_font_small, bd=0, bg=INPUT_BG if INPUT_BG else THEMES["Light"]["INPUT_BG"])
+        entry.pack(fill="x", pady=(0, 4), ipady=6)
+        style_entry(entry)
+        
+        # Pre-fill with existing binding
+        current_value = keyboardless_bindings.get(key, "")
+        if current_value:
+            entry.insert(0, current_value)
+        
+        entry_widgets[key] = entry
+
+    # Buttons at bottom
+    btn_frame = tk.Frame(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+    btn_frame.pack(fill="x", pady=(10, 10), padx=18)
+    
+    def save_and_enter_keyboardless():
+        """Save bindings and enter keyboardless mode."""
+        global keyboardless_bindings
+        
+        # Validate and save all bindings
+        new_bindings = {}
+        for key, entry in entry_widgets.items():
+            value = entry.get().strip()
+            if value and len(value) != 16:
+                messagebox.showerror("Invalid Binding", 
+                                   f"The binding for '{key}' must be exactly 16 characters long.",
+                                   parent=config_win)
+                return
+            new_bindings[key] = value
+        
+        # Check for duplicates
+        values = [v for v in new_bindings.values() if v]
+        if len(values) != len(set(values)):
+            messagebox.showerror("Duplicate Bindings", 
+                               "Each binding must be unique. Please check for duplicates.",
+                               parent=config_win)
+            return
+        
+        # Save bindings
+        keyboardless_bindings = new_bindings
+        save_settings()
+        
+        config_win.destroy()
+        enter_keyboardless_mode()
+    
+    def save_and_close():
+        """Save bindings without entering keyboardless mode."""
+        global keyboardless_bindings
+        
+        # Validate and save all bindings
+        new_bindings = {}
+        for key, entry in entry_widgets.items():
+            value = entry.get().strip()
+            if value and len(value) != 16:
+                messagebox.showerror("Invalid Binding", 
+                                   f"The binding for '{key}' must be exactly 16 characters long.",
+                                   parent=config_win)
+                return
+            new_bindings[key] = value
+        
+        # Check for duplicates
+        values = [v for v in new_bindings.values() if v]
+        if len(values) != len(set(values)):
+            messagebox.showerror("Duplicate Bindings", 
+                               "Each binding must be unique. Please check for duplicates.",
+                               parent=config_win)
+            return
+        
+        # Save bindings
+        keyboardless_bindings = new_bindings
+        save_settings()
+        
+        config_win.destroy()
+    
+    enter_mode_btn = tk.Button(btn_frame, text="Save & Enter Keyboardless Mode", 
+                              command=save_and_enter_keyboardless,
+                              bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], 
+                              fg="white",
+                              font=tk_font_small, bd=0, 
+                              activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], 
+                              padx=12, pady=8)
+    enter_mode_btn.pack(side="right")
+    
+    save_btn = tk.Button(btn_frame, text="Save", 
+                        command=save_and_close,
+                        bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+                        fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+                        font=tk_font_small, bd=0, padx=12, pady=8)
+    save_btn.pack(side="right", padx=(0, 8))
+    
+    close_btn = tk.Button(btn_frame, text="Cancel", 
+                         command=lambda: config_win.destroy(),
+                         bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
+                         fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+                         font=tk_font_small, bd=0, padx=12, pady=8)
+    close_btn.pack(side="left")
+
+
+def enter_keyboardless_mode():
+    """Enter keyboardless mode where all actions are controlled by 16-digit strings."""
+    global keyboardless_mode
+    keyboardless_mode = True
+    
+    # Update footer label
+    try:
+        footer_label.config(text="Notice: Keyboardless mode is active. Press Ctrl+E to exit.")
+    except Exception:
+        pass
+    
+    # Bind Ctrl+E to exit keyboardless mode
+    root.bind("<Control-e>", lambda e: exit_keyboardless_mode())
+    
+    # Force focus on ID entry and keep it focused
+    id_entry.focus_force()
+    
+    # Set up keyboardless input handler
+    def keyboardless_input_handler(event=None):
+        """Handle input in keyboardless mode."""
+        if not keyboardless_mode:
+            return
+        
+        current_input = id_entry.get().strip()
+        
+        # Check if input matches any binding
+        if current_input == keyboardless_bindings.get("sign_in"):
+            action_var.set("in")
+            id_entry.delete(0, tk.END)
+            id_entry.focus_force()
+        elif current_input == keyboardless_bindings.get("sign_out"):
+            action_var.set("out")
+            id_entry.delete(0, tk.END)
+            id_entry.focus_force()
+        elif current_input == keyboardless_bindings.get("internship"):
+            event_var.set("Internship")
+            id_entry.delete(0, tk.END)
+            id_entry.focus_force()
+        elif current_input == keyboardless_bindings.get("build_season"):
+            event_var.set("Build Season")
+            id_entry.delete(0, tk.END)
+            id_entry.focus_force()
+        elif current_input == keyboardless_bindings.get("volunteering"):
+            if "Volunteering" in eventsList:
+                event_var.set("Volunteering")
+            id_entry.delete(0, tk.END)
+            id_entry.focus_force()
+        else:
+            # If not a command, try to process as ID
+            if len(current_input) == 6:
+                try:
+                    int(current_input)
+                    scan_id()
+                except ValueError:
+                    id_entry.delete(0, tk.END)
+                    id_entry.focus_force()
+            elif len(current_input) >= 16:
+                # Clear if too long and not a valid command
+                id_entry.delete(0, tk.END)
+                id_entry.focus_force()
+    
+    # Bind input handler to id_entry
+    id_entry.bind("<KeyRelease>", keyboardless_input_handler)
+    
+    # Periodically refocus id_entry
+    def refocus_id_entry():
+        if keyboardless_mode:
+            try:
+                # Only refocus if no other toplevel window has focus
+                if not any(isinstance(w, tk.Toplevel) and w.winfo_exists() for w in root.winfo_children()):
+                    id_entry.focus_force()
+            except Exception:
+                pass
+            root.after(100, refocus_id_entry)
+    
+    refocus_id_entry()
+
+
+def exit_keyboardless_mode():
+    """Exit keyboardless mode and restore normal operation."""
+    global keyboardless_mode
+    keyboardless_mode = False
+    
+    # Update footer label
+    try:
+        footer_label.config(text="Tip: Press Esc to exit fullscreen.")
+    except Exception:
+        pass
+    
+    # Unbind Ctrl+E
+    root.unbind("<Control-e>")
+    
+    # Unbind keyboardless input handler
+    id_entry.unbind("<KeyRelease>")
+
+
+# --------------------------
 # Options dialog 
 # --------------------------
 
@@ -1250,6 +1648,17 @@ def open_options_window():
     tk.Radiobutton(trigger_frame, text="Sign Out", variable=camera_trigger_var, value="out", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(0, 8))
     tk.Radiobutton(trigger_frame, text="Both", variable=camera_trigger_var, value="both", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left")
     tk.Radiobutton(trigger_frame, text="Never", variable=camera_trigger_var, value="never", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(8,0))
+
+    # Keyboardless Mode button
+    tk.Label(scrollable_frame, text="Keyboardless Mode:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(20, 8))
+    keyboardless_btn = tk.Button(scrollable_frame, text="Configure Keyboardless Mode", 
+                                 command=lambda: [opts.destroy(), open_keyboardless_config_window()],
+                                 bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], 
+                                 fg="white",
+                                 font=tk_font_small, bd=0, 
+                                 activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], 
+                                 padx=16, pady=10)
+    keyboardless_btn.pack(anchor="w", padx=18, pady=(0, 20))
 
     # Buttons at bottom of card (not in scrollable area)
     btn_frame = tk.Frame(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])

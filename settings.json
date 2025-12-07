@@ -3,5 +3,15 @@
   "main_ui_scale": 1.0,
   "whos_here_scale": 1.0,
   "camera_frequency": 1.0,
-  "camera_trigger": "both"
+  "camera_trigger": "both",
+  "keyboardless_bindings": {
+    "sign_in": "0000000000000000",
+    "sign_out": "1111111111111111",
+    "internship": "2222222222222222",
+    "build_season": "3333333333333333",
+    "volunteering": "4444444444444444",
+    "next_option": "5555555555555555",
+    "prev_option": "6666666666666666",
+    "close_popup": "7777777777777777"
+  }
 }
