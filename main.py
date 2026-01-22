@@ -2,10 +2,8 @@ import os
 import sys
 from PIL import ImageFont
 from datetime import datetime
-import sqlite3 as sql
 import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar, OptionMenu, BooleanVar, Checkbutton
-from databaseMain import *
 from driveUpload import *
 from camera import takePic
 from googleapiclient.discovery import build
@@ -52,8 +50,12 @@ def load_private_font(filename):
 
 
 
-# Ensure the table is created 
-createTable()
+# Ensure the IDs sheet exists in Google Sheets
+try:
+    ensure_ids_sheet_exists()
+    print("IDs sheet ready.")
+except Exception as e:
+    print(f"Warning: Could not initialize IDs sheet: {e}")
 
 # Get the list of open sheets 
 global volunteeringList
@@ -63,11 +65,14 @@ if len(volunteeringList) >= 2:
     volunteeringList.pop(0)
     volunteeringList.pop(0)
 
+# Filter out the "IDs" sheet from volunteering options
+volunteeringList = [sheet for sheet in volunteeringList if sheet != "IDs"]
+
 
 # --------------------------
 # UI state variables (can be toggled via Options)
 # --------------------------
-ui_theme = "Light"   # "Light" or "Dark"
+ui_theme = "Light"   # "Light", "Dark" or "Black & Gold"
 main_ui_scale = 1.0  # Scale multiplier for main UI (0.5 - 2.0)
 whos_here_scale = 1.0  # Scale multiplier for Who's Here window (0.5 - 2.0)
 
@@ -105,6 +110,23 @@ THEMES = {
         "FOOTER_TEXT": "#94A9BD",
         "OPTION_MENU_BG": "#111417",
         "OPTION_MENU_FG": "#EAF3FF"
+    }
+    ,
+    "Black & Gold": {
+        # High-contrast black with gold accents
+        "BG_MAIN": "#000000",
+        "PANEL_BG": "#0B0B0B",
+        "ACCENT": "#D4AF37",
+        "ACCENT_DARK": "#A67C00",
+        "TEXT": "#F5F1E6",
+        "POSITIVE": "#6FC17A",
+        "NEGATIVE": "#FF6B6B",
+        "CARD_BORDER": "#1A1A1A",
+        "BUTTON_ACTIVE": "#B8860B",
+        "INPUT_BG": "#0A0A0A",
+        "FOOTER_TEXT": "#CFC0A6",
+        "OPTION_MENU_BG": "#0B0B0B",
+        "OPTION_MENU_FG": "#F5F1E6"
     }
 }
 
@@ -219,7 +241,7 @@ def style_entry(entry):
     For dark mode the outline is thicker for stronger contrast.
     """
     try:
-        thick = 3 if ui_theme == "Dark" else 2
+        thick = 3 if ui_theme in ("Dark", "Black & Gold") else 2
         entry.configure(bg=INPUT_BG, fg=TEXT, insertbackground=TEXT,
                         bd=0, relief="flat", font=tk_font_small,
                         highlightthickness=thick, highlightbackground=CARD_BORDER, highlightcolor=ACCENT)
@@ -357,6 +379,9 @@ keyboardless_bindings = {
     "close_popup": ""
 }
 
+# Easy sign in mode - automatically determines sign in/out based on last action
+easy_signin_mode = False
+
 # Settings persistence
 DEFAULT_SETTINGS = {
     "ui_theme": "Light",
@@ -373,7 +398,8 @@ DEFAULT_SETTINGS = {
         "next_option": "",
         "prev_option": "",
         "close_popup": ""
-    }
+    },
+    "easy_signin_mode": False
 }
 
 SETTINGS_FILE = os.path.join(_get_base_path(), "settings.json")
@@ -385,7 +411,8 @@ def save_settings():
         "whos_here_scale": whos_here_scale,
         "camera_frequency": camera_frequency,
         "camera_trigger": camera_trigger,
-        "keyboardless_bindings": keyboardless_bindings
+        "keyboardless_bindings": keyboardless_bindings,
+        "easy_signin_mode": easy_signin_mode
     }
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -394,7 +421,7 @@ def save_settings():
         pass
 
 def load_settings():
-    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_bindings
+    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_bindings, easy_signin_mode
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -405,6 +432,7 @@ def load_settings():
             camera_frequency = float(data.get("camera_frequency", DEFAULT_SETTINGS["camera_frequency"]))
             camera_trigger = data.get("camera_trigger", DEFAULT_SETTINGS["camera_trigger"])
             keyboardless_bindings = data.get("keyboardless_bindings", DEFAULT_SETTINGS["keyboardless_bindings"].copy())
+            easy_signin_mode = data.get("easy_signin_mode", DEFAULT_SETTINGS["easy_signin_mode"])
     except Exception:
         # on error, fall back to defaults
         ui_theme = DEFAULT_SETTINGS["ui_theme"]
@@ -413,6 +441,7 @@ def load_settings():
         camera_frequency = DEFAULT_SETTINGS["camera_frequency"]
         camera_trigger = DEFAULT_SETTINGS["camera_trigger"]
         keyboardless_bindings = DEFAULT_SETTINGS["keyboardless_bindings"].copy()
+        easy_signin_mode = DEFAULT_SETTINGS["easy_signin_mode"]
 
 def add_sign_in(name, timestamp_str):
     """Add or update a person's sign-in time in the global tracking dict."""
@@ -457,11 +486,53 @@ def scan_id(event=None):
         return
 
     id_entry.delete(0, tk.END)
-    name = getName(current_id)
-    if not name:
-        ask_name_window(current_id)
-    else:
-        open_smile_window(current_id, name)
+    
+    # Show loading screen while fetching name
+    load_win = open_id_lookup_loading_window()
+    
+    # Fetch name in background thread
+    def lookup_and_continue():
+        try:
+            name = get_name_by_id(current_id)
+            # Open next window first, then close loading window to eliminate delay
+            if not name:
+                root.after(0, lambda: (ask_name_window(current_id), load_win.destroy()))
+            else:
+                root.after(0, lambda: (open_smile_window(current_id, name), load_win.destroy()))
+        except Exception as e:
+            root.after(0, load_win.destroy)
+            root.after(0, lambda: messagebox.showerror("Error", f"Failed to lookup ID: {str(e)}"))
+    
+    threading.Thread(target=lookup_and_continue, daemon=True).start()
+
+# Open a loading dialog while ID lookup is happening.
+def open_id_lookup_loading_window():
+    loading_window = Toplevel(root)
+    loading_window.title("Loading...")
+    center_window(loading_window, width=500, height=180)
+    loading_window.configure(bg=BG_MAIN)
+    loading_window.focus_force()
+
+    card = tk.Frame(loading_window, bg=PANEL_BG, bd=1, relief="solid")
+    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=460, height=140)
+    try:
+        card.configure(highlightbackground=CARD_BORDER)
+    except Exception:
+        pass
+
+    loading_label = Label(
+        card,
+        text="Looking up ID — please wait...",
+        font=tk_font_small,
+        fg=TEXT,
+        bg=PANEL_BG,
+        wraplength=420,
+        justify="center"
+    )
+    loading_label.pack(expand=True, fill=tk.BOTH, padx=12, pady=12)
+    
+    center_and_fit(loading_window, card, pad_x=80, pad_y=80)
+    return loading_window
 
 # Prompt for a new user's first+last name and save it to the database.
 def ask_name_window(current_id):
@@ -496,9 +567,23 @@ def ask_name_window(current_id):
             formatted = name
 
         if formatted:
-            writeName(current_id, formatted)
+            # Show a saving/loading dialog while we persist the new ID/name
+            load_win = open_name_submit_loading_window()
+            # Close the name entry window immediately
             new_window.destroy()
-            open_smile_window(current_id, formatted)
+
+            def do_save():
+                try:
+                    ok = save_id_name_pair(current_id, formatted)
+                    if ok:
+                        # Open next window first, then destroy loading
+                        root.after(0, lambda: (open_smile_window(current_id, formatted), load_win.destroy()))
+                    else:
+                        root.after(0, lambda: (load_win.destroy(), messagebox.showerror("Error", "Failed to save ID-name pair.")))
+                except Exception as e:
+                    root.after(0, lambda: (load_win.destroy(), messagebox.showerror("Error", f"Failed to save ID: {e}")))
+
+            threading.Thread(target=do_save, daemon=True).start()
         else:
             messagebox.showerror("Error", "Name cannot be empty.", parent=new_window)
 
@@ -514,8 +599,81 @@ def ask_name_window(current_id):
 
     center_and_fit(new_window, card, pad_x=80, pad_y=80)
 
+
+def open_name_submit_loading_window():
+    """Show a themed loading window while the name/ID save is in progress."""
+    loading_window = Toplevel(root)
+    loading_window.title("Saving...")
+    center_window(loading_window, width=500, height=180)
+    loading_window.configure(bg=BG_MAIN)
+    loading_window.focus_force()
+
+    card = tk.Frame(loading_window, bg=PANEL_BG, bd=1, relief="solid")
+    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=460, height=140)
+    try:
+        card.configure(highlightbackground=CARD_BORDER)
+    except Exception:
+        pass
+
+    loading_label = Label(
+        card,
+        text="Saving — please wait...",
+        font=tk_font_small,
+        fg=TEXT,
+        bg=PANEL_BG,
+        wraplength=420,
+        justify="center"
+    )
+    loading_label.pack(expand=True, fill=tk.BOTH, padx=12, pady=12)
+
+    center_and_fit(loading_window, card, pad_x=80, pad_y=80)
+    return loading_window
+
 # Show a "Smile!" confirmation card and then take a picture after a short delay.
 def open_smile_window(current_id, name):
+    # Decide whether we will actually attempt to take a picture. If the camera
+    # is disabled for this action or the probabilistic frequency check fails,
+    # bypass the picture flow entirely and proceed to record attendance
+    # (with hasPic=False) — this avoids showing a transient popup.
+    try:
+        global camera_frequency, camera_trigger
+        # Determine the effective action (respect easy_signin_mode if enabled)
+        try:
+            if easy_signin_mode:
+                # Determine which sheet to check based on event
+                event = event_var.get()
+                if event == "Internship":
+                    sheet_name = "Main Attendance"
+                elif event == "Build Season":
+                    sheet_name = "Build Season"
+                else:
+                    sheet_name = "Main Attendance"  # Default
+                last_action = get_last_action_from_sheet(current_id, sheet_name)
+                action = "out" if last_action == "in" else "in"
+            else:
+                action = action_var.get()
+        except Exception:
+            action = action_var.get()
+
+        camera_enabled_for_action = (camera_trigger == "both") or (camera_trigger == action)
+    except Exception:
+        camera_enabled_for_action = True
+
+    # If camera is not enabled for this action, bypass picture flow
+    if not camera_enabled_for_action:
+        process_attendance(current_id, name, hasPic=False)
+        return
+
+    # Apply probabilistic frequency check before showing UI
+    try:
+        p = float(camera_frequency)
+    except Exception:
+        p = 1.0
+    if p < 1.0 and random.random() > p:
+        process_attendance(current_id, name, hasPic=False)
+        return
+
+    # Camera will be used; show the Smile popup and take the picture shortly.
     smile_window = Toplevel(root)
     smile_window.title("Smile!")
     center_window(smile_window, width=480, height=320)
@@ -631,13 +789,28 @@ def display_fail_message(container):
     )
     loading_label.pack(expand=True, fill=tk.BOTH, padx=12, pady=10)
 
-# Record attendance to the local DB and start a background thread to push data to Google.
+# Record attendance and start a background thread to push data to Google.
 def process_attendance(current_id, name, hasPic = True):
     now = datetime.now()
     formatted_time = now.strftime("%I:%M %p")
     formatted_date = now.strftime("%Y-%m-%d")
 
-    action = action_var.get()
+    # Determine action based on easy_signin_mode
+    if easy_signin_mode:
+        # Determine which sheet to check based on event
+        event = event_var.get()
+        if event == "Internship":
+            sheet_name = "Main Attendance"
+        elif event == "Build Season":
+            sheet_name = "Build Season"
+        else:
+            sheet_name = "Main Attendance"  # Default
+        last_action = get_last_action_from_sheet(current_id, sheet_name)
+        action = "out" if last_action == "in" else "in"
+    else:
+        # Use the action from radiobuttons
+        action = action_var.get()
+    
     event = event_var.get()
 
     reason = None
@@ -658,7 +831,6 @@ def process_attendance(current_id, name, hasPic = True):
         reason = "Build Season"
 
     full_date = f"Signed {action} at: {formatted_time}, Date: {formatted_date}"
-    writeData(current_id, name, full_date, reason)
 
     # Update global sign-ins tracking: add on sign in, remove on sign out
     try:
@@ -675,12 +847,12 @@ def process_attendance(current_id, name, hasPic = True):
     if (hasPic):
         threading.Thread(
             target=push_to_google,
-            args=(current_id, name, full_date, event, reason, load)
+            args=(current_id, name, full_date, event, reason, load, action)
         ).start()
     else:
         threading.Thread(
             target=push_to_google,
-            args=(current_id, name, full_date, event, reason, load, False)
+            args=(current_id, name, full_date, event, reason, load, action, False)
         ).start()
 
 # Open a loading dialog while background push is happening.
@@ -813,12 +985,10 @@ def volunteering_event_window():
     return event
 
 # Background function: push attendance + image to Google Sheets + Drive.
-def push_to_google(current_id, name, attendance_record, event, reason, load, hasPic = True):
+def push_to_google(current_id, name, attendance_record, event, reason, load, action, hasPic = True):
     try:
         spreadsheet = setup_google_sheet()
         drive = setup_google_drive()
-
-        action = action_var.get()
 
         if (hasPic):
             file_path = f"{folder}/{picName}"
@@ -1005,24 +1175,24 @@ load_private_font(os.path.join("fonts", "Poppins-Regular.ttf"))
 create_fonts()
 
 # Header
-header = tk.Frame(root, bg="#FFFFFF", bd=1, relief="solid")
+header = tk.Frame(root, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
 header.pack(fill="x", padx=24, pady=(20, 10))
-header_title = Label(header, text="Attendance System", font=tk_font_large, bg="#FFFFFF", fg="#1F2D3D")
+header_title = Label(header, text="Attendance System", font=tk_font_large, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"])
 header_title.pack(side="left", padx=20, pady=18)
 
 # Options button
-options_btn = tk.Button(header, text="⚙️ Options", command=lambda: open_options_window(), bg="#FFFFFF", fg="#1F2D3D",
-                        font=tk_font_small, bd=0, activebackground="#0B63C7")
+options_btn = tk.Button(header, text="⚙️ Options", command=lambda: open_options_window(), bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+                        font=tk_font_small, bd=0, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"])
 options_btn.pack(side="right", padx=16, pady=12)
 
 # Who's Here button
-tracking_btn = tk.Button(header, text="Who's here?", command=lambda: open_whos_here_window(), bg="#FFFFFF", fg="#1F2D3D",
-                        font=tk_font_small, bd=0, activebackground="#0B63C7")
+tracking_btn = tk.Button(header, text="Who's here?", command=lambda: open_whos_here_window(), bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+                        font=tk_font_small, bd=0, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"])
 tracking_btn.pack(side="right", padx=16, pady=12)
 
 
 # Main panel
-main_card = tk.Frame(root, bg="#FFFFFF", bd=1, relief="solid")
+main_card = tk.Frame(root, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
 main_card.pack(expand=True, padx=24, pady=12, ipadx=10, ipady=10)
 try:
     main_card.configure(highlightbackground=THEMES["Light"]["CARD_BORDER"])
@@ -1030,20 +1200,20 @@ except Exception:
     pass
 
 # Inputs column
-inputs_frame = tk.Frame(main_card, bg="#FFFFFF")
+inputs_frame = tk.Frame(main_card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
 inputs_frame.pack(side="left", fill="both", expand=True, padx=28, pady=20)
 
-Label(inputs_frame, text="Enter your ID:", font=tk_font_medium, bg="#FFFFFF", fg="#1F2D3D").pack(anchor="w", pady=(6, 8))
-id_entry = Entry(inputs_frame, font=tk_font_medium, bd=0, bg="#FFFFFF", justify="center")
+Label(inputs_frame, text="Enter your ID:", font=tk_font_medium, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"]).pack(anchor="w", pady=(6, 8))
+id_entry = Entry(inputs_frame, font=tk_font_medium, bd=0, bg=INPUT_BG if INPUT_BG else THEMES["Light"]["INPUT_BG"], justify="center")
 id_entry.pack(fill="x", pady=(0, 12), ipady=10)
 style_entry(id_entry)
 id_entry.bind("<Return>", lambda event: scan_id())
 
 # Controls column
-controls_frame = tk.Frame(main_card, bg="#FFFFFF")
+controls_frame = tk.Frame(main_card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
 controls_frame.pack(side="right", fill="both", expand=True, padx=28, pady=20)
 
-Label(controls_frame, text="Why are you here:", font=tk_font_small, bg="#FFFFFF", fg="#1F2D3D").pack(anchor="w", pady=(6, 6))
+Label(controls_frame, text="Why are you here:", font=tk_font_small, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"]).pack(anchor="w", pady=(6, 6))
 
 if len(volunteeringList) > 0:
     eventsList = ["Internship", "Build Season", "Volunteering"]
@@ -1062,21 +1232,44 @@ except Exception:
 # bind Enter on the optionmenu to trigger no-op selection (keeps behavior consistent)
 w.bind("<Return>", lambda e: None)
 
-Label(controls_frame, text="Select Action:", font=tk_font_small, bg="#FFFFFF", fg="#1F2D3D").pack(anchor="w", pady=(6, 6))
-Radiobutton(controls_frame, text="Sign In", font=tk_font_smedium, variable=action_var, value="in", bg="#FFFFFF").pack(anchor="w")
-Radiobutton(controls_frame, text="Sign Out", font=tk_font_smedium, variable=action_var, value="out", bg="#FFFFFF").pack(anchor="w")
+# Radio buttons for sign in/out (store references for toggling visibility)
+action_label = Label(controls_frame, text="Select Action:", font=tk_font_small, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"]) 
+action_label.pack(anchor="w", pady=(6, 6))
+radio_signin = Radiobutton(controls_frame, text="Sign In", font=tk_font_smedium, variable=action_var, value="in", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"])
+radio_signin.pack(anchor="w")
+radio_signout = Radiobutton(controls_frame, text="Sign Out", font=tk_font_smedium, variable=action_var, value="out", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"])
+radio_signout.pack(anchor="w")
+
+def toggle_action_radiobuttons():
+    """Show or hide the action radiobuttons based on easy_signin_mode."""
+    if easy_signin_mode:
+        action_label.pack_forget()
+        radio_signin.pack_forget()
+        radio_signout.pack_forget()
+    else:
+        # Re-pack them if not already visible
+        try:
+            if not action_label.winfo_ismapped():
+                action_label.pack(anchor="w", pady=(6, 6))
+                radio_signin.pack(anchor="w")
+                radio_signout.pack(anchor="w")
+        except Exception:
+            pass
+
+# Apply initial visibility based on loaded settings
+toggle_action_radiobuttons()
 
 # Action row
-action_row = tk.Frame(root, bg="#F3F6FA")
+action_row = tk.Frame(root, bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
 action_row.pack(fill="x", padx=24, pady=(6, 24))
 enter_btn = tk.Button(action_row, text="Enter", font=tk_font_smedium, command=lambda: scan_id(),
                       bg="#1565C0", fg="white", bd=0, activebackground="#0B63C7", padx=18, pady=10)
 enter_btn.pack(side="right")
 
 # Footer
-footer = tk.Frame(root, bg="#F3F6FA")
+footer = tk.Frame(root, bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
 footer.pack(fill="x", padx=24, pady=(0, 18))
-footer_label = Label(footer, text="Tip: Press Esc to exit fullscreen.", font=tk_font_small, bg="#F3F6FA", fg="#5D6D7E")
+footer_label = Label(footer, text="Tip: Press Esc to exit fullscreen.", font=tk_font_small, bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"], fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"])
 footer_label.pack(side="left", padx=6, pady=6)
 
 # --------------------------
@@ -1144,6 +1337,53 @@ def open_whos_here_window():
             w.destroy()
         
         current = get_current_signins()
+        
+        # Check for and auto sign-out anyone signed in for 12+ hours
+        now = datetime.now()
+        names_to_remove = []
+        for name, ts_str in list(current.items()):
+            try:
+                # Parse timestamp string like "03:45 PM, 2024-01-15"
+                time_part, date_part = ts_str.split(", ")
+                # Combine and parse
+                datetime_str = f"{date_part} {time_part}"
+                signin_time = datetime.strptime(datetime_str, "%Y-%m-%d %I:%M %p")
+                
+                # Calculate time difference
+                time_diff = now - signin_time
+                if time_diff.total_seconds() >= 12 * 3600:  # 12 hours in seconds
+                    names_to_remove.append((name, signin_time))
+                    current.pop(name, None)
+            except Exception:
+                # If parsing fails, skip this entry
+                pass
+        
+        # Sign out anyone who exceeded 12 hours
+        for name, signin_time in names_to_remove:
+            try:
+                remove_sign_in(name)
+                # Get the ID from the IDs sheet for this person
+                current_id = get_id_by_name(name)
+                
+                if current_id:
+                    current_time = now.strftime("%I:%M %p")
+                    current_date = now.strftime("%Y-%m-%d")
+                    full_date = f"Signed out at: {current_time}, Date: {current_date}"
+                    
+                    # Write to Google Sheets sign-out columns
+                    try:
+                        spreadsheet = setup_google_sheet()
+                        # Determine which sheet to write to based on last sign-in
+                        # Default to Main Attendance for auto sign-outs
+                        sheet = spreadsheet.worksheet("Main Attendance")
+                        data = [current_id, name, full_date, "No Image", "No Image", "Didn't sign out"]
+                        row = next_available_row(sheet, "H:H")
+                        sheet.update(f"H{row}:M{row}", [data])
+                    except Exception as e:
+                        print(f"Error writing auto sign-out to Google Sheets: {e}")
+            except Exception:
+                pass
+        
         if not current:
             Label(scrollable_frame, text="No one is currently signed in.", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"], font=wh_font_small).pack(pady=8, padx=8)
             return
@@ -1155,8 +1395,8 @@ def open_whos_here_window():
         except Exception:
             avail_w = 400
         
-        # Sort by timestamp and create labels
-        for name, ts in sorted(current.items(), key=lambda x: x[1]):
+        # Sort by timestamp in reverse order (most recent first)
+        for name, ts in sorted(current.items(), key=lambda x: x[1], reverse=True):
             Label(scrollable_frame, text=f"{name} — Signed in at {ts}", anchor="w", justify="left", 
                   bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
                   fg=TEXT if TEXT else THEMES["Light"]["TEXT"], 
@@ -1455,15 +1695,21 @@ def enter_keyboardless_mode():
         current_input = id_entry.get().strip()
         
         # Check if input matches any binding
-        if current_input == keyboardless_bindings.get("sign_in"):
-            action_var.set("in")
-            id_entry.delete(0, tk.END)
-            id_entry.focus_force()
-        elif current_input == keyboardless_bindings.get("sign_out"):
-            action_var.set("out")
-            id_entry.delete(0, tk.END)
-            id_entry.focus_force()
-        elif current_input == keyboardless_bindings.get("internship"):
+        # Skip sign_in/sign_out bindings if easy_signin_mode is enabled
+        if not easy_signin_mode:
+            if current_input == keyboardless_bindings.get("sign_in"):
+                action_var.set("in")
+                id_entry.delete(0, tk.END)
+                id_entry.focus_force()
+                return
+            elif current_input == keyboardless_bindings.get("sign_out"):
+                action_var.set("out")
+                id_entry.delete(0, tk.END)
+                id_entry.focus_force()
+                return
+        
+        # Process other bindings (these work regardless of easy_signin_mode)
+        if current_input == keyboardless_bindings.get("internship"):
             event_var.set("Internship")
             id_entry.delete(0, tk.END)
             id_entry.focus_force()
@@ -1582,7 +1828,7 @@ def open_options_window():
     # Theme selector
     tk.Label(scrollable_frame, text="Theme:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(16, 4))
     theme_var_local = StringVar(value=ui_theme)
-    theme_menu = OptionMenu(scrollable_frame, theme_var_local, "Light", "Dark")
+    theme_menu = OptionMenu(scrollable_frame, theme_var_local, "Light", "Dark", "Black & Gold")
     theme_menu.configure(font=tk_font_small, bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"], fg=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"], bd=0, relief="flat")
     try:
         theme_menu["menu"].configure(bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"],
@@ -1644,10 +1890,34 @@ def open_options_window():
     camera_trigger_var = tk.StringVar(value=camera_trigger)
     trigger_frame = tk.Frame(scrollable_frame, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
     trigger_frame.pack(anchor="w", padx=18, pady=(0, 12))
-    tk.Radiobutton(trigger_frame, text="Sign In", variable=camera_trigger_var, value="in", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(0, 8))
-    tk.Radiobutton(trigger_frame, text="Sign Out", variable=camera_trigger_var, value="out", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(0, 8))
-    tk.Radiobutton(trigger_frame, text="Both", variable=camera_trigger_var, value="both", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left")
-    tk.Radiobutton(trigger_frame, text="Never", variable=camera_trigger_var, value="never", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], font=tk_font_small).pack(side="left", padx=(8,0))
+    tk.Radiobutton(trigger_frame, text="Sign In", variable=camera_trigger_var, value="in", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(side="left", padx=(0, 8))
+    tk.Radiobutton(trigger_frame, text="Sign Out", variable=camera_trigger_var, value="out", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(side="left", padx=(0, 8))
+    tk.Radiobutton(trigger_frame, text="Both", variable=camera_trigger_var, value="both", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(side="left")
+    tk.Radiobutton(trigger_frame, text="Never", variable=camera_trigger_var, value="never", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(side="left", padx=(8,0))
+
+    # Update global camera_trigger immediately when the radiobutton value changes
+    def _on_camera_trigger_change(*args):
+        try:
+            global camera_trigger
+            camera_trigger = camera_trigger_var.get()
+        except Exception:
+            pass
+
+    # Use trace_add if available, otherwise fallback to trace for older Tkinter
+    try:
+        camera_trigger_var.trace_add("write", _on_camera_trigger_change)
+    except Exception:
+        try:
+            camera_trigger_var.trace("w", _on_camera_trigger_change)
+        except Exception:
+            pass
+
+    # Easy Sign In Mode checkbox
+    tk.Label(scrollable_frame, text="Easy Sign In Mode:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(20, 4))
+    tk.Label(scrollable_frame, text="Automatically determines sign in/out based on your last action.", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"], font=tk_font_small, wraplength=700).pack(anchor="w", padx=18, pady=(0, 8))
+    easy_signin_var = BooleanVar(value=easy_signin_mode)
+    easy_signin_check = Checkbutton(scrollable_frame, text="Enable Easy Sign In Mode", variable=easy_signin_var, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small, selectcolor=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+    easy_signin_check.pack(anchor="w", padx=18, pady=(0, 12))
 
     # Keyboardless Mode button
     tk.Label(scrollable_frame, text="Keyboardless Mode:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(20, 8))
@@ -1664,8 +1934,8 @@ def open_options_window():
     btn_frame = tk.Frame(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
     btn_frame.pack(fill="x", pady=(0, 10), padx=18)
     def reset_to_defaults():
-        nonlocal theme_var_local, main_scale_var, whos_here_scale_var, camera_freq_var, camera_trigger_var
-        global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger
+        nonlocal theme_var_local, main_scale_var, whos_here_scale_var, camera_freq_var, camera_trigger_var, easy_signin_var
+        global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, easy_signin_mode
         # confirm with the user before resetting
         try:
             if not messagebox.askyesno("Reset Defaults", "Are you sure you want to reset all settings to defaults? This will overwrite your current settings."):
@@ -1680,6 +1950,7 @@ def open_options_window():
         whos_here_scale = DEFAULT_SETTINGS["whos_here_scale"]
         camera_frequency = DEFAULT_SETTINGS["camera_frequency"]
         camera_trigger = DEFAULT_SETTINGS["camera_trigger"]
+        easy_signin_mode = DEFAULT_SETTINGS["easy_signin_mode"]
 
         # update local controls
         try:
@@ -1691,12 +1962,14 @@ def open_options_window():
             camera_freq_var.set(camera_frequency)
             update_camera_freq_label(camera_frequency)
             camera_trigger_var.set(camera_trigger)
+            easy_signin_var.set(easy_signin_mode)
         except Exception:
             pass
 
         # apply and save
         try:
             apply_ui_settings()
+            toggle_action_radiobuttons()
             save_settings()
             refresh_whos_here_window()
             adjust_all_toplevels_to_scale()
@@ -1704,8 +1977,8 @@ def open_options_window():
             pass
 
     def apply_and_close(event_arg=None):
-        nonlocal theme_var_local, main_scale_var, whos_here_scale_var, camera_freq_var, camera_trigger_var
-        global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger
+        nonlocal theme_var_local, main_scale_var, whos_here_scale_var, camera_freq_var, camera_trigger_var, easy_signin_var
+        global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, easy_signin_mode
         ui_theme = theme_var_local.get()
         main_ui_scale = main_scale_var.get()
         whos_here_scale = whos_here_scale_var.get()
@@ -1715,8 +1988,12 @@ def open_options_window():
         except Exception:
             camera_frequency = 1.0
         camera_trigger = camera_trigger_var.get()
+        # easy sign in mode
+        easy_signin_mode = easy_signin_var.get()
 
         apply_ui_settings()
+        # Toggle radiobuttons visibility
+        toggle_action_radiobuttons()
         # Trigger manual refresh of Who's Here window if open
         refresh_whos_here_window()
         # Adjust other open dialogs/windows to the new scale
