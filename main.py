@@ -49,13 +49,38 @@ def load_private_font(filename):
     return font_path
 
 
+# Global dictionary to track current signed-in people.
+# Keys: person's name (string) -> value: sign-in timestamp string (e.g. "03:24 PM, 2025-12-04")
+sign_ins = {}
 
-# Ensure the IDs sheet exists in Google Sheets
+# Initialize IDs cache and background sync
 try:
     ensure_ids_sheet_exists()
     print("IDs sheet ready.")
+    
+    # Load all IDs into local cache
+    print("Loading IDs cache from Google Sheets...")
+    if load_ids_cache():
+        print("IDs cache loaded successfully.")
+    else:
+        print("Warning: Failed to load IDs cache.")
+    
+    # Load Who's Here from sheets (persist across restarts)
+    print("Loading Who's Here from Google Sheets...")
+    try:
+        sheets_to_scan = ["Main Attendance", "Build Season"]
+        loaded_signins = fetch_whos_here_from_sheets(sheets_to_scan)
+        for pname, pts in loaded_signins.items():
+            sign_ins[pname] = pts
+        print(f"Loaded {len(loaded_signins)} currently signed-in people from sheets.")
+    except Exception as e:
+        print(f"Warning: Could not load Who's Here from sheets: {e}")
+    
+    # Start background sync thread
+    start_background_sync()
+    print("Background sync started.")
 except Exception as e:
-    print(f"Warning: Could not initialize IDs sheet: {e}")
+    print(f"Warning: Could not initialize IDs system: {e}")
 
 # Get the list of open sheets 
 global volunteeringList
@@ -351,10 +376,6 @@ def apply_ui_settings():
 # Core logic functions 
 # --------------------------
 
-# Global dictionary to track current signed-in people.
-# Keys: person's name (string) -> value: sign-in timestamp string (e.g. "03:24 PM, 2025-12-04")
-sign_ins = {}
-
 # Track the currently-open "Who's Here" window and its after() id so we can
 # avoid multiple pollers and cancel polling when the window closes.
 whos_here_win = None
@@ -487,23 +508,15 @@ def scan_id(event=None):
 
     id_entry.delete(0, tk.END)
     
-    # Show loading screen while fetching name
-    load_win = open_id_lookup_loading_window()
-    
-    # Fetch name in background thread
-    def lookup_and_continue():
-        try:
-            name = get_name_by_id(current_id)
-            # Open next window first, then close loading window to eliminate delay
-            if not name:
-                root.after(0, lambda: (ask_name_window(current_id), load_win.destroy()))
-            else:
-                root.after(0, lambda: (open_smile_window(current_id, name), load_win.destroy()))
-        except Exception as e:
-            root.after(0, load_win.destroy)
-            root.after(0, lambda: messagebox.showerror("Error", f"Failed to lookup ID: {str(e)}"))
-    
-    threading.Thread(target=lookup_and_continue, daemon=True).start()
+    # get_name_by_id is now an instant local cache lookup — no loading window needed
+    try:
+        name = get_name_by_id(current_id)
+        if not name:
+            ask_name_window(current_id)
+        else:
+            open_smile_window(current_id, name)
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to lookup ID: {str(e)}")
 
 # Open a loading dialog while ID lookup is happening.
 def open_id_lookup_loading_window():
@@ -567,23 +580,13 @@ def ask_name_window(current_id):
             formatted = name
 
         if formatted:
-            # Show a saving/loading dialog while we persist the new ID/name
-            load_win = open_name_submit_loading_window()
-            # Close the name entry window immediately
+            # save_id_name_pair is now instant (local cache + background queue)
+            ok = save_id_name_pair(current_id, formatted)
             new_window.destroy()
-
-            def do_save():
-                try:
-                    ok = save_id_name_pair(current_id, formatted)
-                    if ok:
-                        # Open next window first, then destroy loading
-                        root.after(0, lambda: (open_smile_window(current_id, formatted), load_win.destroy()))
-                    else:
-                        root.after(0, lambda: (load_win.destroy(), messagebox.showerror("Error", "Failed to save ID-name pair.")))
-                except Exception as e:
-                    root.after(0, lambda: (load_win.destroy(), messagebox.showerror("Error", f"Failed to save ID: {e}")))
-
-            threading.Thread(target=do_save, daemon=True).start()
+            if ok:
+                open_smile_window(current_id, formatted)
+            else:
+                messagebox.showerror("Error", "Failed to save ID-name pair.")
         else:
             messagebox.showerror("Error", "Name cannot be empty.", parent=new_window)
 
@@ -640,16 +643,8 @@ def open_smile_window(current_id, name):
         # Determine the effective action (respect easy_signin_mode if enabled)
         try:
             if easy_signin_mode:
-                # Determine which sheet to check based on event
-                event = event_var.get()
-                if event == "Internship":
-                    sheet_name = "Main Attendance"
-                elif event == "Build Season":
-                    sheet_name = "Build Season"
-                else:
-                    sheet_name = "Main Attendance"  # Default
-                last_action = get_last_action_from_sheet(current_id, sheet_name)
-                action = "out" if last_action == "in" else "in"
+                # Use local sign_ins dict instead of API call
+                action = "out" if name in sign_ins else "in"
             else:
                 action = action_var.get()
         except Exception:
@@ -789,7 +784,7 @@ def display_fail_message(container):
     )
     loading_label.pack(expand=True, fill=tk.BOTH, padx=12, pady=10)
 
-# Record attendance and start a background thread to push data to Google.
+# Record attendance: update local tracking immediately, then queue background push to Google.
 def process_attendance(current_id, name, hasPic = True):
     now = datetime.now()
     formatted_time = now.strftime("%I:%M %p")
@@ -797,16 +792,8 @@ def process_attendance(current_id, name, hasPic = True):
 
     # Determine action based on easy_signin_mode
     if easy_signin_mode:
-        # Determine which sheet to check based on event
-        event = event_var.get()
-        if event == "Internship":
-            sheet_name = "Main Attendance"
-        elif event == "Build Season":
-            sheet_name = "Build Season"
-        else:
-            sheet_name = "Main Attendance"  # Default
-        last_action = get_last_action_from_sheet(current_id, sheet_name)
-        action = "out" if last_action == "in" else "in"
+        # Use local sign_ins dict instead of API call
+        action = "out" if name in sign_ins else "in"
     else:
         # Use the action from radiobuttons
         action = action_var.get()
@@ -843,17 +830,27 @@ def process_attendance(current_id, name, hasPic = True):
     except Exception:
         pass
 
-    load = open_loading_window()
-    if (hasPic):
-        threading.Thread(
-            target=push_to_google,
-            args=(current_id, name, full_date, event, reason, load, action)
-        ).start()
-    else:
-        threading.Thread(
-            target=push_to_google,
-            args=(current_id, name, full_date, event, reason, load, action, False)
-        ).start()
+    # Determine image folder/filename for background push
+    img_folder = None
+    img_picName = None
+    if hasPic:
+        try:
+            img_folder = folder
+            img_picName = picName
+        except Exception:
+            hasPic = False
+
+    # Queue the Google push for background processing (non-blocking)
+    attendance_queue.put((
+        current_id, name, full_date, event, reason, action,
+        hasPic, img_folder, img_picName, volunteeringList
+    ))
+
+    # Show confirmation immediately — no waiting for Google
+    messagebox.showinfo(
+        "Attendance Recorded",
+        f"Name: {name}\n{full_date}\nReason: {reason if reason else 'N/A'}"
+    )
 
 # Open a loading dialog while background push is happening.
 def open_loading_window():
@@ -1358,11 +1355,11 @@ def open_whos_here_window():
                 # If parsing fails, skip this entry
                 pass
         
-        # Sign out anyone who exceeded 12 hours
+        # Sign out anyone who exceeded 12 hours (queue for background push)
         for name, signin_time in names_to_remove:
             try:
                 remove_sign_in(name)
-                # Get the ID from the IDs sheet for this person
+                # Get the ID from the local cache
                 current_id = get_id_by_name(name)
                 
                 if current_id:
@@ -1370,17 +1367,11 @@ def open_whos_here_window():
                     current_date = now.strftime("%Y-%m-%d")
                     full_date = f"Signed out at: {current_time}, Date: {current_date}"
                     
-                    # Write to Google Sheets sign-out columns
-                    try:
-                        spreadsheet = setup_google_sheet()
-                        # Determine which sheet to write to based on last sign-in
-                        # Default to Main Attendance for auto sign-outs
-                        sheet = spreadsheet.worksheet("Main Attendance")
-                        data = [current_id, name, full_date, "No Image", "No Image", "Didn't sign out"]
-                        row = next_available_row(sheet, "H:H")
-                        sheet.update(f"H{row}:M{row}", [data])
-                    except Exception as e:
-                        print(f"Error writing auto sign-out to Google Sheets: {e}")
+                    # Queue auto sign-out for background push (no direct API call)
+                    attendance_queue.put((
+                        current_id, name, full_date, "Internship", "Didn't sign out",
+                        "out", False, None, None, volunteeringList
+                    ))
             except Exception:
                 pass
         
@@ -1445,10 +1436,30 @@ def open_whos_here_window():
         wh_font_small_btn = font.Font(family="Poppins", size=max(8, int(18 * whos_here_scale)))
     except Exception:
         wh_font_small_btn = tk_font_small
-    
+
+    def refresh_from_sheets():
+        """Re-scan Google Sheets in the background to rebuild sign_ins, then repopulate the list."""
+        refresh_btn.config(state="disabled", text="Refreshing...")
+
+        def _do_refresh():
+            try:
+                sheets_to_scan = ["Main Attendance", "Build Season"]
+                loaded = fetch_whos_here_from_sheets(sheets_to_scan)
+                # Merge: sheet data is authoritative — reset sign_ins from it
+                sign_ins.clear()
+                for pname, pts in loaded.items():
+                    sign_ins[pname] = pts
+                print(f"Refreshed Who's Here: {len(loaded)} people currently signed in.")
+            except Exception as e:
+                print(f"Error refreshing Who's Here from sheets: {e}")
+            # Repopulate the UI on the main thread
+            root.after(0, lambda: (populate(), refresh_btn.config(state="normal", text="Refresh")))
+
+        threading.Thread(target=_do_refresh, daemon=True).start()
+
     btn_row = tk.Frame(container, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"]) 
     btn_row.pack(fill="x", pady=(6, 12), padx=12)
-    refresh_btn = tk.Button(btn_row, text="Refresh", command=populate, bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white", bd=0, font=wh_font_small_btn, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], padx=12, pady=6)
+    refresh_btn = tk.Button(btn_row, text="Refresh", command=refresh_from_sheets, bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white", bd=0, font=wh_font_small_btn, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"], padx=12, pady=6)
     refresh_btn.pack(side="left")
     close_btn = tk.Button(btn_row, text="Close", command=_cleanup_and_close, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], bd=0, font=wh_font_small_btn, padx=12, pady=6)
     close_btn.pack(side="right")
@@ -2022,6 +2033,18 @@ def open_options_window():
 
 # Apply UI settings once widgets exist
 apply_ui_settings()
+
+# Register cleanup handler for when the app closes
+def on_closing():
+    """Clean up resources before closing the application."""
+    print("Shutting down...")
+    try:
+        stop_background_sync()
+    except Exception as e:
+        print(f"Error stopping background sync: {e}")
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
 
 # Start application loop
 root.mainloop()

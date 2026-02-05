@@ -3,6 +3,9 @@ from googleapiclient.http import MediaFileUpload
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
 import os
+import threading
+import queue
+import time
 
 
 # API File Path, Change this depending on your API file.
@@ -73,6 +76,25 @@ def upload_image_to_drive(drive_service, file_path):
 # --------------------------
 IDS_SHEET_NAME = "IDs"
 
+# --------------------------
+# Local ID Cache
+# --------------------------
+# Local dictionary cache: ID (str) -> Name (str)
+id_to_name_cache = {}
+# Reverse lookup cache: Name (str) -> ID (str)
+name_to_id_cache = {}
+
+# Queue for new IDs that need to be uploaded to the sheet in the background
+new_id_queue = queue.Queue()
+
+# Queue for attendance records that need to be pushed to Google in the background
+# Items are tuples: (current_id, name, attendance_record, event, reason, action, hasPic, folder, picName)
+attendance_queue = queue.Queue()
+
+# Background thread for syncing new IDs
+background_sync_thread = None
+background_sync_running = False
+
 def ensure_ids_sheet_exists(document=defaultDoc):
     """
     Ensure the 'IDs' subsheet exists in the spreadsheet.
@@ -95,102 +117,263 @@ def ensure_ids_sheet_exists(document=defaultDoc):
         return ids_sheet
 
 
-def get_name_by_id(student_id, document=defaultDoc):
+def load_ids_cache(document=defaultDoc):
     """
-    Look up a student's name by their ID in the IDs sheet.
+    Load all IDs and names from the Google Sheet into the local cache.
+    This should be called once on startup.
     
     Args:
-        student_id: The student's 6-digit ID (int or str)
-        document: The Google Spreadsheet document name
-    
-    Returns:
-        str: The student's name if found, None otherwise
-    """
-    try:
-        ids_sheet = ensure_ids_sheet_exists(document)
-        student_id_str = str(student_id)
-        
-        # Only fetch ID column (B) first to find matching row
-        id_column = ids_sheet.col_values(2)  # Column B (IDs)
-        
-        # Search for matching ID (skip header at index 0)
-        for row_idx, cell_id in enumerate(id_column[1:], start=2):  # start=2 because row 1 is header
-            if cell_id == student_id_str:
-                # Found match - fetch only the name from column A for this row
-                name = ids_sheet.cell(row_idx, 1).value  # Column A
-                return name
-        
-        return None
-    except Exception as e:
-        print(f"Error looking up ID {student_id}: {e}")
-        return None
-
-
-def get_id_by_name(name, document=defaultDoc):
-    """
-    Look up a student's ID by their name in the IDs sheet.
-    
-    Args:
-        name: The student's name
-        document: The Google Spreadsheet document name
-    
-    Returns:
-        str: The student's ID if found, None otherwise
-    """
-    try:
-        ids_sheet = ensure_ids_sheet_exists(document)
-        
-        # Only fetch name column (A) first to find matching row
-        name_column = ids_sheet.col_values(1)  # Column A (Names)
-        
-        # Search for matching name (skip header at index 0)
-        for row_idx, cell_name in enumerate(name_column[1:], start=2):  # start=2 because row 1 is header
-            if cell_name == name:
-                # Found match - fetch only the ID from column B for this row
-                student_id = ids_sheet.cell(row_idx, 2).value  # Column B
-                return student_id
-        
-        return None
-    except Exception as e:
-        print(f"Error looking up name {name}: {e}")
-        return None
-
-
-def save_id_name_pair(student_id, name, document=defaultDoc):
-    """
-    Save a student ID and name pair to the IDs sheet.
-    Only adds new entries - does NOT update existing names.
-    
-    Args:
-        student_id: The student's 6-digit ID (int or str)
-        name: The student's name
         document: The Google Spreadsheet document name
     
     Returns:
         bool: True if successful, False otherwise
     """
+    global id_to_name_cache, name_to_id_cache
     try:
         ids_sheet = ensure_ids_sheet_exists(document)
+        
+        # Fetch all data at once (more efficient than multiple cell lookups)
+        all_values = ids_sheet.get_all_values()
+        
+        # Clear existing caches
+        id_to_name_cache.clear()
+        name_to_id_cache.clear()
+        
+        # Skip header row (index 0) and populate both caches
+        for row in all_values[1:]:
+            if len(row) >= 2 and row[0] and row[1]:  # Both name and ID must exist
+                name = row[0]
+                student_id = str(row[1])
+                id_to_name_cache[student_id] = name
+                name_to_id_cache[name] = student_id
+        
+        print(f"Loaded {len(id_to_name_cache)} IDs into local cache")
+        return True
+        
+    except Exception as e:
+        print(f"Error loading IDs cache: {e}")
+        return False
+
+
+def _process_id_item(item, document):
+    """
+    Process a single new-ID item from the queue.
+    Checks if it exists in the sheet and uploads if not.
+    Returns True on success, False to retry.
+    """
+    student_id, name = item
+    student_id_str = str(student_id)
+    print(f"Background sync: Processing ID {student_id_str} with name '{name}'")
+    try:
+        ids_sheet = ensure_ids_sheet_exists(document)
+        id_column = ids_sheet.col_values(2)  # Column B (IDs)
+        if student_id_str in id_column[1:]:
+            print(f"Background sync: ID {student_id_str} already exists in sheet, skipping")
+        else:
+            next_row = len(id_column) + 1
+            ids_sheet.update_acell(f'A{next_row}', name)
+            ids_sheet.update_acell(f'B{next_row}', student_id_str)
+            print(f"Background sync: Added new entry: '{name}' with ID {student_id_str}")
+        return True
+    except Exception as e:
+        print(f"Background sync: Error processing ID {student_id_str}: {e}")
+        return False
+
+
+def _process_attendance_item(item, document):
+    """
+    Process a single attendance item from the queue.
+    Pushes the attendance record (and optional image) to Google.
+    Returns True on success, False to retry.
+    """
+    current_id, name, attendance_record, event, reason, action, hasPic, img_folder, img_picName, volunteering_list = item
+    print(f"Background sync: Pushing attendance for '{name}' ({action})")
+    try:
+        spreadsheet = setup_google_sheet(document)
+        drive = setup_google_drive()
+
+        if hasPic and img_folder and img_picName:
+            file_path = f"{img_folder}/{img_picName}"
+            print(f"Background sync: Uploading image {file_path}")
+            file_url = upload_image_to_drive(drive, file_path)
+        else:
+            file_path = "No Image"
+            file_url = "No Image"
+
+        # Determine target sheet
+        if (reason not in volunteering_list) and reason != "Build Season":
+            sheet = spreadsheet.worksheet("Main Attendance")
+        elif reason == "Build Season":
+            sheet = spreadsheet.worksheet("Build Season")
+        else:
+            sheet = spreadsheet.worksheet(reason)
+
+        # Insert data into the correct columns
+        data = [current_id, name, attendance_record, file_path, file_url, reason]
+        if action == "in":
+            values = sheet.get("A:A")
+            row = len(values) + 1
+            sheet.update(f"A{row}:F{row}", [data])
+        else:
+            values = sheet.get("H:H")
+            row = len(values) + 1
+            sheet.update(f"H{row}:M{row}", [data])
+
+        print(f"Background sync: Attendance pushed for '{name}'")
+        return True
+    except Exception as e:
+        print(f"Background sync: Error pushing attendance for '{name}': {e}")
+        return False
+
+
+def background_sync_worker(document=defaultDoc):
+    """
+    Background worker that continuously processes both the new_id_queue
+    and the attendance_queue.  Runs in a separate daemon thread so it
+    never blocks the main UI / attendance flow.
+    """
+    global background_sync_running
+    print("Background sync worker started")
+
+    while background_sync_running:
+        processed_something = False
+
+        # --- Process one ID item if available ---
+        try:
+            item = new_id_queue.get_nowait()
+            if not _process_id_item(item, document):
+                new_id_queue.put(item)  # retry later
+                time.sleep(5)
+            else:
+                new_id_queue.task_done()
+            processed_something = True
+        except queue.Empty:
+            pass
+
+        # --- Process one attendance item if available ---
+        try:
+            item = attendance_queue.get_nowait()
+            if not _process_attendance_item(item, document):
+                attendance_queue.put(item)  # retry later
+                time.sleep(5)
+            else:
+                attendance_queue.task_done()
+            processed_something = True
+        except queue.Empty:
+            pass
+
+        # If neither queue had work, sleep briefly before rechecking
+        if not processed_something:
+            time.sleep(0.5)
+
+    print("Background sync worker stopped")
+
+
+def start_background_sync(document=defaultDoc):
+    """
+    Start the background sync thread if it's not already running.
+    
+    Args:
+        document: The Google Spreadsheet document name
+    """
+    global background_sync_thread, background_sync_running
+    
+    if background_sync_running:
+        print("Background sync already running")
+        return
+    
+    background_sync_running = True
+    background_sync_thread = threading.Thread(
+        target=background_sync_worker,
+        args=(document,),
+        daemon=True,
+        name="IDBackgroundSync"
+    )
+    background_sync_thread.start()
+    print("Background sync thread started")
+
+
+def stop_background_sync():
+    """
+    Stop the background sync thread gracefully.
+    """
+    global background_sync_running
+    background_sync_running = False
+    print("Background sync thread stopping...")
+
+
+def get_name_by_id(student_id, document=defaultDoc):
+    """
+    Look up a student's name by their ID using the local cache.
+    No Google API calls are made.
+    
+    Args:
+        student_id: The student's 6-digit ID (int or str)
+        document: The Google Spreadsheet document name (unused, kept for compatibility)
+    
+    Returns:
+        str: The student's name if found, None otherwise
+    """
+    try:
+        student_id_str = str(student_id)
+        return id_to_name_cache.get(student_id_str, None)
+    except Exception as e:
+        print(f"Error looking up ID {student_id} in cache: {e}")
+        return None
+
+
+def get_id_by_name(name, document=defaultDoc):
+    """
+    Look up a student's ID by their name using the local cache.
+    No Google API calls are made.
+    
+    Args:
+        name: The student's name
+        document: The Google Spreadsheet document name (unused, kept for compatibility)
+    
+    Returns:
+        str: The student's ID if found, None otherwise
+    """
+    try:
+        return name_to_id_cache.get(name, None)
+    except Exception as e:
+        print(f"Error looking up name {name} in cache: {e}")
+        return None
+
+
+def save_id_name_pair(student_id, name, document=defaultDoc):
+    """
+    Save a student ID and name pair to the local cache and queue for background sync.
+    This immediately updates the local cache and returns, while the background thread
+    handles uploading to the Google Sheet asynchronously.
+    
+    Args:
+        student_id: The student's 6-digit ID (int or str)
+        name: The student's name
+        document: The Google Spreadsheet document name
+    
+    Returns:
+        bool: True if successfully added to cache and queued, False otherwise
+    """
+    global id_to_name_cache, name_to_id_cache
+    try:
         student_id_str = str(student_id)
         
-        # Only fetch ID column (B) to check for duplicates
-        id_column = ids_sheet.col_values(2)  # Column B (IDs)
-        
-        # Check if ID already exists - if so, do nothing (name is permanent)
-        if student_id_str in id_column[1:]:  # Skip header
-            # Find the row to get the existing name for logging
-            for row_idx, cell_id in enumerate(id_column[1:], start=2):
-                if cell_id == student_id_str:
-                    existing_name = ids_sheet.cell(row_idx, 1).value
-                    print(f"ID {student_id} already exists with name '{existing_name}' - not updating")
-                    break
+        # Check if ID already exists in local cache
+        if student_id_str in id_to_name_cache:
+            existing_name = id_to_name_cache[student_id_str]
+            print(f"ID {student_id} already exists in cache with name '{existing_name}' - not updating")
             return True
         
-        # ID doesn't exist, add new row with both name and ID
-        next_row = len(id_column) + 1
-        ids_sheet.update_acell(f'A{next_row}', name)
-        ids_sheet.update_acell(f'B{next_row}', student_id_str)
-        print(f"Added new entry: '{name}' with ID {student_id}")
+        # Add to local cache immediately
+        id_to_name_cache[student_id_str] = name
+        name_to_id_cache[name] = student_id_str
+        print(f"Added to local cache: '{name}' with ID {student_id}")
+        
+        # Queue for background upload to sheet
+        new_id_queue.put((student_id, name))
+        print(f"Queued for background sync: '{name}' with ID {student_id}")
+        
         return True
         
     except Exception as e:
@@ -240,6 +423,80 @@ def parse_timestamp(timestamp_str):
     except Exception as e:
         print(f"Error parsing timestamp '{timestamp_str}': {e}")
         return None
+
+
+def fetch_whos_here_from_sheets(sheet_names, document=defaultDoc):
+    """
+    Scan one or more attendance sub-sheets and return a dict of people
+    who are currently signed in (i.e. their most recent sign-in has no
+    matching sign-out afterwards).
+
+    The sheet structure is:
+      Sign-ins:  A=ID, B=Name, C=Timestamp
+      Sign-outs: H=ID, I=Name, J=Timestamp
+
+    Returns:
+        dict: name (str) -> sign-in timestamp string  "HH:MM AM/PM, YYYY-MM-DD"
+    """
+    from datetime import datetime as _dt
+
+    currently_here = {}  # name -> friendly timestamp string
+
+    try:
+        spreadsheet = setup_google_sheet(document)
+    except Exception as e:
+        print(f"fetch_whos_here_from_sheets: Cannot open spreadsheet: {e}")
+        return currently_here
+
+    for sheet_name in sheet_names:
+        try:
+            sheet = spreadsheet.worksheet(sheet_name)
+
+            # Pull all data at once to minimise API calls
+            all_values = sheet.get_all_values()
+            if len(all_values) <= 1:
+                continue  # only header row
+
+            rows = all_values[1:]  # skip header
+
+            # Build per-person latest sign-in and sign-out datetimes
+            # sign_in:  col A(0)=ID, B(1)=Name, C(2)=Timestamp
+            # sign_out: col H(7)=ID, I(8)=Name, J(9)=Timestamp
+            person_last_in = {}   # name -> (datetime, friendly_ts)
+            person_last_out = {}  # name -> datetime
+
+            for row in rows:
+                # --- sign-in side ---
+                if len(row) >= 3 and row[1] and row[2]:
+                    name_in = row[1]
+                    ts_in = parse_timestamp(row[2])
+                    if ts_in:
+                        if name_in not in person_last_in or ts_in > person_last_in[name_in][0]:
+                            # Build a friendly timestamp string "HH:MM AM/PM, YYYY-MM-DD"
+                            friendly = ts_in.strftime("%I:%M %p") + ", " + ts_in.strftime("%Y-%m-%d")
+                            person_last_in[name_in] = (ts_in, friendly)
+
+                # --- sign-out side ---
+                if len(row) >= 10 and row[8] and row[9]:
+                    name_out = row[8]
+                    ts_out = parse_timestamp(row[9])
+                    if ts_out:
+                        if name_out not in person_last_out or ts_out > person_last_out[name_out]:
+                            person_last_out[name_out] = ts_out
+
+            # A person is "here" if their latest sign-in is MORE RECENT than
+            # their latest sign-out (or they have no sign-out at all).
+            for name, (last_in_dt, friendly_ts) in person_last_in.items():
+                last_out_dt = person_last_out.get(name)
+                if last_out_dt is None or last_in_dt > last_out_dt:
+                    # Also skip anyone signed in > 12 hours ago
+                    if (_dt.now() - last_in_dt).total_seconds() < 12 * 3600:
+                        currently_here[name] = friendly_ts
+
+        except Exception as e:
+            print(f"fetch_whos_here_from_sheets: Error scanning '{sheet_name}': {e}")
+
+    return currently_here
 
 
 def get_last_action_from_sheet(student_id, sheet_name, document=defaultDoc):
