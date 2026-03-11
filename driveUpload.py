@@ -1,35 +1,40 @@
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from oauth2client.service_account import ServiceAccountCredentials
-import gspread
+from google_auth import get_gspread_client, get_drive_service
 import os
 import threading
 import queue
 import time
 
 
-# API File Path, Change this depending on your API file.
-APIPath = "C:/Users/aqazi075/Downloads/robotics-attendance-447321-ca10f1c31867.json"
-defaultDoc = "Internship Attendance Sheet"
+defaultDoc = ""
 
 
-# Setup Google Sheets API
-def setup_google_sheet(document = defaultDoc) :
-    # Change this to your sheet's name ^
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
-    client = gspread.authorize(creds)
+def set_default_doc(name):
+    """Set the default spreadsheet document name used by all functions."""
+    global defaultDoc
+    defaultDoc = name
+
+
+def get_default_doc():
+    """Return the current default spreadsheet document name."""
+    return defaultDoc
+
+
+# Setup Google Sheets API (now uses OAuth via google_auth module)
+def setup_google_sheet(document=None):
+    if document is None:
+        document = defaultDoc
+    if not document:
+        raise ValueError("No Google Sheet configured. Go to Options → Google Sheet Setup.")
+    client = get_gspread_client()
     sheet = client.open(document)
     return sheet
 
-# Authenticate Google Drive API
+# Authenticate Google Drive API (now uses OAuth via google_auth module)
 def setup_google_drive():
-    scope = ['https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(APIPath, scope)
-    drive_service = build('drive', 'v3', credentials=creds)
-    return drive_service
+    return get_drive_service()
 
-def list_sheets(document = defaultDoc):
+def list_sheets(document=None):
     spreadsheet = setup_google_sheet(document)
     worksheets = spreadsheet.worksheets()   # list of Worksheet objects
     sheet_names = [ws.title for ws in worksheets]
@@ -95,7 +100,7 @@ attendance_queue = queue.Queue()
 background_sync_thread = None
 background_sync_running = False
 
-def ensure_ids_sheet_exists(document=defaultDoc):
+def ensure_ids_sheet_exists(document=None):
     """
     Ensure the 'IDs' subsheet exists in the spreadsheet.
     Creates it if it doesn't exist with headers 'Name' and 'ID'.
@@ -117,7 +122,7 @@ def ensure_ids_sheet_exists(document=defaultDoc):
         return ids_sheet
 
 
-def load_ids_cache(document=defaultDoc):
+def load_ids_cache(document=None):
     """
     Load all IDs and names from the Google Sheet into the local cache.
     This should be called once on startup.
@@ -226,7 +231,7 @@ def _process_attendance_item(item, document):
         return False
 
 
-def background_sync_worker(document=defaultDoc):
+def background_sync_worker(document=None):
     """
     Background worker that continuously processes both the new_id_queue
     and the attendance_queue.  Runs in a separate daemon thread so it
@@ -269,7 +274,7 @@ def background_sync_worker(document=defaultDoc):
     print("Background sync worker stopped")
 
 
-def start_background_sync(document=defaultDoc):
+def start_background_sync(document=None):
     """
     Start the background sync thread if it's not already running.
     
@@ -302,7 +307,7 @@ def stop_background_sync():
     print("Background sync thread stopping...")
 
 
-def get_name_by_id(student_id, document=defaultDoc):
+def get_name_by_id(student_id, document=None):
     """
     Look up a student's name by their ID using the local cache.
     No Google API calls are made.
@@ -322,7 +327,7 @@ def get_name_by_id(student_id, document=defaultDoc):
         return None
 
 
-def get_id_by_name(name, document=defaultDoc):
+def get_id_by_name(name, document=None):
     """
     Look up a student's ID by their name using the local cache.
     No Google API calls are made.
@@ -341,7 +346,7 @@ def get_id_by_name(name, document=defaultDoc):
         return None
 
 
-def save_id_name_pair(student_id, name, document=defaultDoc):
+def save_id_name_pair(student_id, name, document=None):
     """
     Save a student ID and name pair to the local cache and queue for background sync.
     This immediately updates the local cache and returns, while the background thread
@@ -425,7 +430,7 @@ def parse_timestamp(timestamp_str):
         return None
 
 
-def fetch_whos_here_from_sheets(sheet_names, document=defaultDoc):
+def fetch_whos_here_from_sheets(sheet_names, document=None):
     """
     Scan one or more attendance sub-sheets and return a dict of people
     who are currently signed in (i.e. their most recent sign-in has no
@@ -499,7 +504,7 @@ def fetch_whos_here_from_sheets(sheet_names, document=defaultDoc):
     return currently_here
 
 
-def get_last_action_from_sheet(student_id, sheet_name, document=defaultDoc):
+def get_last_action_from_sheet(student_id, sheet_name, document=None):
     """
     Get the last action (in or out) for a given student ID by scanning the specified subsheet.
     Uses timestamps to determine which action happened most recently.
@@ -576,3 +581,53 @@ def get_last_action_from_sheet(student_id, sheet_name, document=defaultDoc):
     except Exception as e:
         print(f"Error getting last action from sheet: {e}")
         return "out"  # Default to "out" on error
+
+
+def create_attendance_spreadsheet(name):
+    """Create a new Google Spreadsheet with the standard attendance worksheets.
+
+    Creates:
+      • Main Attendance  (headers in A1:F1 and H1:M1)
+      • Build Season     (same layout)
+      • IDs              (Name, ID)
+
+    The default 'Sheet1' is removed after the real sheets are added.
+
+    Args:
+        name: Title for the new spreadsheet.
+
+    Returns:
+        str: The title of the newly created spreadsheet.
+
+    Raises:
+        Exception on API errors.
+    """
+    client = get_gspread_client()
+    spreadsheet = client.create(name)
+
+    attendance_headers = [["ID", "Name", "Timestamp", "Image Path", "Image URL", "Reason",
+                           "", "ID", "Name", "Timestamp", "Image Path", "Image URL", "Reason"]]
+
+    main_ws = spreadsheet.add_worksheet(title="Main Attendance", rows=1000, cols=13)
+    main_ws.update("A1:M1", attendance_headers)
+
+    build_ws = spreadsheet.add_worksheet(title="Build Season", rows=1000, cols=13)
+    build_ws.update("A1:M1", attendance_headers)
+
+    ids_ws = spreadsheet.add_worksheet(title="IDs", rows=1000, cols=2)
+    ids_ws.update("A1:B1", [["Name", "ID"]])
+
+    # Remove the default blank 'Sheet1'
+    try:
+        default_sheet = spreadsheet.worksheet("Sheet1")
+        spreadsheet.del_worksheet(default_sheet)
+    except Exception:
+        pass
+
+    return spreadsheet.title
+
+
+def list_user_spreadsheets():
+    """Return a list of spreadsheet titles in the signed-in user's Drive."""
+    client = get_gspread_client()
+    return [s.title for s in client.openall()]

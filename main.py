@@ -6,11 +6,8 @@ import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar, OptionMenu, BooleanVar, Checkbutton
 from driveUpload import *
 from camera import takePic
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from oauth2client.service_account import ServiceAccountCredentials
+from google_auth import is_signed_in, get_user_email, sign_out
 from tkinter import font
-import gspread
 import time
 import threading
 import random
@@ -53,45 +50,60 @@ def load_private_font(filename):
 # Keys: person's name (string) -> value: sign-in timestamp string (e.g. "03:24 PM, 2025-12-04")
 sign_ins = {}
 
-# Initialize IDs cache and background sync
-try:
-    ensure_ids_sheet_exists()
-    print("IDs sheet ready.")
-    
-    # Load all IDs into local cache
-    print("Loading IDs cache from Google Sheets...")
-    if load_ids_cache():
-        print("IDs cache loaded successfully.")
-    else:
-        print("Warning: Failed to load IDs cache.")
-    
-    # Load Who's Here from sheets (persist across restarts)
-    print("Loading Who's Here from Google Sheets...")
+# Volunteering list (populated later after settings/sheet are loaded)
+volunteeringList = []
+
+
+def initialize_google_connection():
+    """Initialize IDs cache, Who's Here, background sync, and volunteering list.
+
+    Call this after the sheet_name is known (either on startup or after the
+    user configures their sheet in the options).  Safe to call more than once.
+    """
+    global volunteeringList
+
+    doc = get_default_doc()
+    if not doc:
+        print("No Google Sheet configured — skipping initialization.")
+        return False
+
     try:
-        sheets_to_scan = ["Main Attendance", "Build Season"]
-        loaded_signins = fetch_whos_here_from_sheets(sheets_to_scan)
-        for pname, pts in loaded_signins.items():
-            sign_ins[pname] = pts
-        print(f"Loaded {len(loaded_signins)} currently signed-in people from sheets.")
+        ensure_ids_sheet_exists()
+        print("IDs sheet ready.")
+
+        print("Loading IDs cache from Google Sheets...")
+        if load_ids_cache():
+            print("IDs cache loaded successfully.")
+        else:
+            print("Warning: Failed to load IDs cache.")
+
+        print("Loading Who's Here from Google Sheets...")
+        try:
+            sheets_to_scan = ["Main Attendance", "Build Season"]
+            loaded_signins = fetch_whos_here_from_sheets(sheets_to_scan)
+            for pname, pts in loaded_signins.items():
+                sign_ins[pname] = pts
+            print(f"Loaded {len(loaded_signins)} currently signed-in people from sheets.")
+        except Exception as e:
+            print(f"Warning: Could not load Who's Here from sheets: {e}")
+
+        start_background_sync()
+        print("Background sync started.")
     except Exception as e:
-        print(f"Warning: Could not load Who's Here from sheets: {e}")
-    
-    # Start background sync thread
-    start_background_sync()
-    print("Background sync started.")
-except Exception as e:
-    print(f"Warning: Could not initialize IDs system: {e}")
+        print(f"Warning: Could not initialize IDs system: {e}")
 
-# Get the list of open sheets 
-global volunteeringList
-volunteeringList = list_sheets()
-print(volunteeringList)
-if len(volunteeringList) >= 2:
-    volunteeringList.pop(0)
-    volunteeringList.pop(0)
+    # Refresh volunteering list
+    try:
+        all_sheets = list_sheets()
+        print(all_sheets)
+        # Remove the first two standard sheets and the IDs sheet
+        filtered = [s for s in all_sheets if s not in ("Main Attendance", "Build Season", "IDs")]
+        volunteeringList = filtered
+    except Exception as e:
+        print(f"Warning: Could not list sheets: {e}")
+        volunteeringList = []
 
-# Filter out the "IDs" sheet from volunteering options
-volunteeringList = [sheet for sheet in volunteeringList if sheet != "IDs"]
+    return True
 
 
 # --------------------------
@@ -413,6 +425,9 @@ keyboardless_bindings = {
 # Easy sign in mode - automatically determines sign in/out based on last action
 easy_signin_mode = False
 
+# Google Sheet name (set by user in options)
+sheet_name = ""
+
 # Settings persistence
 DEFAULT_SETTINGS = {
     "ui_theme": "Light",
@@ -430,7 +445,8 @@ DEFAULT_SETTINGS = {
         "prev_option": "",
         "close_popup": ""
     },
-    "easy_signin_mode": False
+    "easy_signin_mode": False,
+    "sheet_name": ""
 }
 
 SETTINGS_FILE = os.path.join(_get_base_path(), "settings.json")
@@ -443,7 +459,8 @@ def save_settings():
         "camera_frequency": camera_frequency,
         "camera_trigger": camera_trigger,
         "keyboardless_bindings": keyboardless_bindings,
-        "easy_signin_mode": easy_signin_mode
+        "easy_signin_mode": easy_signin_mode,
+        "sheet_name": sheet_name
     }
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -452,7 +469,7 @@ def save_settings():
         pass
 
 def load_settings():
-    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_bindings, easy_signin_mode
+    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_bindings, easy_signin_mode, sheet_name
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -464,6 +481,7 @@ def load_settings():
             camera_trigger = data.get("camera_trigger", DEFAULT_SETTINGS["camera_trigger"])
             keyboardless_bindings = data.get("keyboardless_bindings", DEFAULT_SETTINGS["keyboardless_bindings"].copy())
             easy_signin_mode = data.get("easy_signin_mode", DEFAULT_SETTINGS["easy_signin_mode"])
+            sheet_name = data.get("sheet_name", DEFAULT_SETTINGS["sheet_name"])
     except Exception:
         # on error, fall back to defaults
         ui_theme = DEFAULT_SETTINGS["ui_theme"]
@@ -473,6 +491,7 @@ def load_settings():
         camera_trigger = DEFAULT_SETTINGS["camera_trigger"]
         keyboardless_bindings = DEFAULT_SETTINGS["keyboardless_bindings"].copy()
         easy_signin_mode = DEFAULT_SETTINGS["easy_signin_mode"]
+        sheet_name = DEFAULT_SETTINGS["sheet_name"]
 
 def add_sign_in(name, timestamp_str):
     """Add or update a person's sign-in time in the global tracking dict."""
@@ -508,6 +527,15 @@ def refresh_whos_here_window():
 
 # Validate the ID entry, fetch the name from DB, and either prompt for name or take picture+record attendance.
 def scan_id(event=None):
+    # Guard: ensure a sheet is configured before allowing attendance
+    if not get_default_doc():
+        messagebox.showwarning(
+            "Google Sheet Not Configured",
+            "Please configure a Google Sheet first.\n"
+            "Go to Options → Configure Google Sheet."
+        )
+        return
+
     try:
         current_id = int(id_entry.get())
         if len(str(current_id)) != 6 or current_id < 0:
@@ -1177,6 +1205,11 @@ root.bind("<Escape>", lambda event: root.attributes("-fullscreen", False))
 # Initialize fonts (so widgets can use them)
 # Load saved settings (if present) before creating fonts so scale is applied
 load_settings()
+
+# Apply saved sheet name to the driveUpload module
+if sheet_name:
+    set_default_doc(sheet_name)
+
 load_private_font(os.path.join("fonts", "Poppins-Regular.ttf"))
 create_fonts()
 
@@ -1825,6 +1858,187 @@ def exit_keyboardless_mode():
 
 
 # --------------------------
+# Google Sheet Setup dialog
+# --------------------------
+def open_sheet_setup_window():
+    """Open a themed window to configure or create a Google Sheet."""
+    setup_win = Toplevel(root)
+    setup_win.title("Google Sheet Setup")
+    setup_win.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
+    setup_win.focus_force()
+    setup_win.geometry("620x520")
+    setup_win.resizable(True, True)
+
+    container = tk.Frame(setup_win, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
+    container.pack(fill="both", expand=True, padx=20, pady=20)
+    try:
+        container.configure(highlightbackground=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"])
+    except Exception:
+        pass
+
+    # Title
+    tk.Label(container, text="Google Sheet Setup", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+             font=tk_font_medium).pack(pady=(18, 4), padx=18)
+
+    tk.Label(container, text="Choose an existing Google Sheet from your Drive, or create a new one.",
+             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
+             font=tk_font_small, wraplength=560, justify="center").pack(pady=(0, 14), padx=18)
+
+    # --- Section 1: Current sheet ---
+    current_frame = tk.Frame(container, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
+    current_frame.pack(fill="x", padx=18, pady=(0, 8))
+
+    current_text = sheet_name if sheet_name else "(none)"
+    current_label = tk.Label(current_frame, text=f"Current sheet:  {current_text}",
+                             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+                             fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+                             font=tk_font_small)
+    current_label.pack(anchor="w")
+
+    # Status label (shows success/error messages)
+    status_var = StringVar(value="")
+    status_label = tk.Label(container, textvariable=status_var,
+                            bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+                            fg=POSITIVE if POSITIVE else THEMES["Light"]["POSITIVE"],
+                            font=tk_font_small, wraplength=560)
+    status_label.pack(pady=(0, 6), padx=18)
+
+    # --- Section 2: Use existing sheet ---
+    sep1 = tk.Frame(container, bg=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"], height=1)
+    sep1.pack(fill="x", padx=18, pady=(4, 10))
+
+    tk.Label(container, text="Use an existing sheet", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18)
+
+    tk.Label(container, text="Type the exact name of a Google Sheet already in your Drive.",
+             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
+             font=tk_font_small, wraplength=560).pack(anchor="w", padx=18, pady=(0, 6))
+
+    existing_entry = Entry(container, font=tk_font_small, bd=0, bg=INPUT_BG if INPUT_BG else THEMES["Light"]["INPUT_BG"], justify="center")
+    existing_entry.pack(fill="x", padx=18, pady=(0, 6), ipady=8)
+    style_entry(existing_entry)
+    if sheet_name:
+        existing_entry.insert(0, sheet_name)
+
+    def use_existing():
+        global sheet_name
+        name = existing_entry.get().strip()
+        if not name:
+            status_var.set("Please enter a sheet name.")
+            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"])
+            return
+
+        status_var.set("Verifying...")
+        status_label.configure(fg=TEXT if TEXT else THEMES["Light"]["TEXT"])
+        setup_win.update_idletasks()
+
+        def _verify():
+            try:
+                set_default_doc(name)
+                # Try opening to verify it exists and is accessible
+                setup_google_sheet(name)
+                # Success
+                root.after(0, lambda: _on_verify_success(name))
+            except Exception as e:
+                root.after(0, lambda: _on_verify_fail(str(e)))
+
+        def _on_verify_success(verified_name):
+            global sheet_name
+            sheet_name = verified_name
+            set_default_doc(sheet_name)
+            save_settings()
+            current_label.config(text=f"Current sheet:  {sheet_name}")
+            status_var.set(f"✓  Connected to \"{sheet_name}\" successfully!")
+            status_label.configure(fg=POSITIVE if POSITIVE else THEMES["Light"]["POSITIVE"])
+            # Initialize the connection in background
+            threading.Thread(target=initialize_google_connection, daemon=True).start()
+
+        def _on_verify_fail(err):
+            status_var.set(f"Could not open that sheet. Make sure the name is exact.\n{err}")
+            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"])
+
+        threading.Thread(target=_verify, daemon=True).start()
+
+    use_btn = tk.Button(container, text="Connect", command=use_existing,
+                        bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white",
+                        font=tk_font_small, bd=0,
+                        activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
+                        padx=14, pady=8)
+    use_btn.pack(anchor="w", padx=18, pady=(0, 10))
+
+    # --- Section 3: Create new sheet ---
+    sep2 = tk.Frame(container, bg=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"], height=1)
+    sep2.pack(fill="x", padx=18, pady=(4, 10))
+
+    tk.Label(container, text="Create a new sheet", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18)
+
+    tk.Label(container, text="This will create a new Google Sheet in your Drive with the right layout.",
+             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
+             font=tk_font_small, wraplength=560).pack(anchor="w", padx=18, pady=(0, 6))
+
+    new_name_entry = Entry(container, font=tk_font_small, bd=0, bg=INPUT_BG if INPUT_BG else THEMES["Light"]["INPUT_BG"], justify="center")
+    new_name_entry.pack(fill="x", padx=18, pady=(0, 6), ipady=8)
+    style_entry(new_name_entry)
+    new_name_entry.insert(0, "Attendance Sheet")
+
+    def create_new():
+        global sheet_name
+        name = new_name_entry.get().strip()
+        if not name:
+            status_var.set("Please enter a name for the new sheet.")
+            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"])
+            return
+
+        status_var.set("Creating sheet — this may take a moment...")
+        status_label.configure(fg=TEXT if TEXT else THEMES["Light"]["TEXT"])
+        setup_win.update_idletasks()
+
+        def _create():
+            try:
+                created_name = create_attendance_spreadsheet(name)
+                root.after(0, lambda: _on_create_success(created_name))
+            except Exception as e:
+                root.after(0, lambda: _on_create_fail(str(e)))
+
+        def _on_create_success(created_name):
+            global sheet_name
+            sheet_name = created_name
+            set_default_doc(sheet_name)
+            save_settings()
+            existing_entry.delete(0, tk.END)
+            existing_entry.insert(0, sheet_name)
+            current_label.config(text=f"Current sheet:  {sheet_name}")
+            status_var.set(f"✓  Created \"{sheet_name}\" in your Google Drive!")
+            status_label.configure(fg=POSITIVE if POSITIVE else THEMES["Light"]["POSITIVE"])
+            threading.Thread(target=initialize_google_connection, daemon=True).start()
+
+        def _on_create_fail(err):
+            status_var.set(f"Failed to create sheet.\n{err}")
+            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"])
+
+        threading.Thread(target=_create, daemon=True).start()
+
+    create_btn = tk.Button(container, text="Create", command=create_new,
+                           bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white",
+                           font=tk_font_small, bd=0,
+                           activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
+                           padx=14, pady=8)
+    create_btn.pack(anchor="w", padx=18, pady=(0, 14))
+
+    # Close button
+    close_btn = tk.Button(container, text="Close", command=setup_win.destroy,
+                          bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+                          fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
+                          font=tk_font_small, bd=0, padx=12, pady=6)
+    close_btn.pack(side="bottom", pady=(0, 12))
+
+
+# --------------------------
 # Options dialog 
 # --------------------------
 
@@ -1976,6 +2190,22 @@ def open_options_window():
     easy_signin_check = Checkbutton(scrollable_frame, text="Enable Easy Sign In Mode", variable=easy_signin_var, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small, selectcolor=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
     easy_signin_check.pack(anchor="w", padx=18, pady=(0, 12))
 
+    # Google Sheet Setup button
+    tk.Label(scrollable_frame, text="Google Sheet:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(20, 4))
+    sheet_status_text = sheet_name if sheet_name else "Not configured"
+    tk.Label(scrollable_frame, text=f"Current: {sheet_status_text}",
+             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
+             font=tk_font_small).pack(anchor="w", padx=18, pady=(0, 8))
+    sheet_setup_btn = tk.Button(scrollable_frame, text="Configure Google Sheet",
+                                command=lambda: [opts.destroy(), open_sheet_setup_window()],
+                                bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"],
+                                fg="white",
+                                font=tk_font_small, bd=0,
+                                activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
+                                padx=16, pady=10)
+    sheet_setup_btn.pack(anchor="w", padx=18, pady=(0, 20))
+
     # Keyboardless Mode button
     tk.Label(scrollable_frame, text="Keyboardless Mode:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(20, 8))
     keyboardless_btn = tk.Button(scrollable_frame, text="Configure Keyboardless Mode", 
@@ -2091,6 +2321,32 @@ def on_closing():
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_closing)
+
+
+# --------------------------
+# Deferred Google initialization (after UI is built)
+# --------------------------
+def _deferred_startup():
+    """Run Google initialisation after the main loop starts.
+
+    If no sheet is configured yet, show the setup dialog so the user can
+    configure one before using the app.
+    """
+    if not sheet_name:
+        messagebox.showwarning(
+            "Google Sheet Not Configured",
+            "No Google Sheet has been set up yet.\n\n"
+            "Please configure or create a Google Sheet so the app "
+            "knows where to save attendance data."
+        )
+        open_sheet_setup_window()
+    else:
+        # Sheet is known — connect in the background so the UI stays responsive
+        threading.Thread(target=initialize_google_connection, daemon=True).start()
+
+
+# Schedule the check for after the mainloop starts
+root.after(200, _deferred_startup)
 
 # Start application loop
 root.mainloop()

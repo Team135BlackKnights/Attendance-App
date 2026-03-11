@@ -2,3 +2,6 @@
 *.db
 *.pyc
 *.jpeg
+
+# OAuth token (user-specific, never commit)
+token.json
