@@ -252,7 +252,17 @@ def create_fonts():
 def style_optionmenu(optmenu):
     """Style an OptionMenu widget and its underlying menu."""
     try:
-        optmenu.configure(font=tk_font_small, bg=OPTION_MENU_BG, fg=OPTION_MENU_FG, activebackground=OPTION_MENU_BG, bd=0, relief="flat")
+        optmenu.configure(
+            font=tk_font_small,
+            bg=OPTION_MENU_BG,
+            fg=OPTION_MENU_FG,
+            activebackground=OPTION_MENU_BG,
+            activeforeground=OPTION_MENU_FG,
+            bd=0,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=CARD_BORDER
+        )
         m = optmenu["menu"]
         # menu background/foreground and active colors
         m.configure(bg=OPTION_MENU_BG, fg=OPTION_MENU_FG, activebackground=ACCENT_DARK, activeforeground=OPTION_MENU_FG, bd=0)
@@ -905,9 +915,8 @@ def volunteering_event_window():
 
     volunteering_var = StringVar(value="None")
     eventDropdown = OptionMenu(card, volunteering_var, *volunteeringList)
-    eventDropdown.configure(font=tk_font_small, bg=OPTION_MENU_BG, fg=OPTION_MENU_FG, bd=0, relief="flat")
     try:
-        eventDropdown["menu"].configure(bg=OPTION_MENU_BG, fg=OPTION_MENU_FG, activebackground=ACCENT_DARK, activeforeground=OPTION_MENU_FG)
+        style_optionmenu(eventDropdown)
     except Exception:
         pass
     eventDropdown.pack(pady=6)
@@ -1217,15 +1226,16 @@ if len(volunteeringList) > 0:
 else:
     eventsList = ["Internship", "Build Season"]
 
-w = OptionMenu(controls_frame, event_var, *eventsList)
-w.config(font=tk_font_small)
-w.pack(anchor="w", pady=(0, 12))
-# make sure initial OptionMenu uses the theme's menu colors
-try:
-    w["menu"].configure(bg=THEMES[ui_theme]["OPTION_MENU_BG"], fg=THEMES[ui_theme]["OPTION_MENU_FG"],
-                       activebackground=THEMES[ui_theme]["ACCENT_DARK"], activeforeground=THEMES[ui_theme]["OPTION_MENU_FG"])
-except Exception:
-    pass
+    w = OptionMenu(controls_frame, event_var, *eventsList)
+    try:
+        style_optionmenu(w)
+    except Exception:
+        # fallback to basic config
+        try:
+            w.config(font=tk_font_small)
+        except Exception:
+            pass
+    w.pack(anchor="w", pady=(0, 12))
 # bind Enter on the optionmenu to trigger no-op selection (keeps behavior consistent)
 w.bind("<Return>", lambda e: None)
 
@@ -1305,6 +1315,18 @@ def open_whos_here_window():
     
     header_label = Label(container, text="Currently Signed In:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=get_header_font())
     header_label.pack(pady=(12, 8))
+
+    # Ordering dropdown for Who's Here
+    order_var = StringVar(value="Most Recent")
+    order_options = ["Alphabetical (A-Z)", "Alphabetical (Z-A)", "Most Recent", "Oldest"]
+    try:
+        order_menu = OptionMenu(container, order_var, *order_options)
+        order_menu.config(font=tk_font_small)
+        # place to the right of header_label visually
+        order_menu.pack(pady=(0, 8))
+        style_optionmenu(order_menu)
+    except Exception:
+        order_menu = None
 
     # Scrollable list area
     list_container = tk.Frame(container, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
@@ -1386,11 +1408,31 @@ def open_whos_here_window():
         except Exception:
             avail_w = 400
         
-        # Sort by timestamp in reverse order (most recent first)
-        for name, ts in sorted(current.items(), key=lambda x: x[1], reverse=True):
-            Label(scrollable_frame, text=f"{name} — Signed in at {ts}", anchor="w", justify="left", 
-                  bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], 
-                  fg=TEXT if TEXT else THEMES["Light"]["TEXT"], 
+        # Sort according to selected ordering
+        items = list(current.items())
+
+        def parse_ts(ts_str):
+            try:
+                time_part, date_part = ts_str.split(", ")
+                datetime_str = f"{date_part} {time_part}"
+                return datetime.strptime(datetime_str, "%Y-%m-%d %I:%M %p")
+            except Exception:
+                return None
+
+        ordering = order_var.get() if 'order_var' in locals() else "Most Recent"
+        if ordering == "Alphabetical (A-Z)":
+            items.sort(key=lambda x: x[0].split()[0].lower())
+        elif ordering == "Alphabetical (Z-A)":
+            items.sort(key=lambda x: x[0].split()[0].lower(), reverse=True)
+        elif ordering == "Oldest":
+            items.sort(key=lambda x: (parse_ts(x[1]) or datetime.min))
+        else:  # Most Recent (default)
+            items.sort(key=lambda x: (parse_ts(x[1]) or datetime.min), reverse=True)
+
+        for name, ts in items:
+            Label(scrollable_frame, text=f"{name} — Signed in at {ts}", anchor="w", justify="left",
+                  bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
+                  fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
                   font=wh_font_small, wraplength=avail_w).pack(fill="x", padx=8, pady=4)
         
         # Update header font as well
@@ -1840,14 +1882,18 @@ def open_options_window():
     tk.Label(scrollable_frame, text="Theme:", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18, pady=(16, 4))
     theme_var_local = StringVar(value=ui_theme)
     theme_menu = OptionMenu(scrollable_frame, theme_var_local, "Light", "Dark", "Black & Gold")
-    theme_menu.configure(font=tk_font_small, bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"], fg=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"], bd=0, relief="flat")
     try:
-        theme_menu["menu"].configure(bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"],
-                                     fg=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"],
-                                     activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
-                                     activeforeground=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"])
+        style_optionmenu(theme_menu)
     except Exception:
-        pass
+        # fallback to the previous manual configuration
+        try:
+            theme_menu.configure(font=tk_font_small, bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"], fg=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"], bd=0, relief="flat")
+            theme_menu["menu"].configure(bg=OPTION_MENU_BG if OPTION_MENU_BG else THEMES["Light"]["OPTION_MENU_BG"],
+                                           fg=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"],
+                                           activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
+                                           activeforeground=OPTION_MENU_FG if OPTION_MENU_FG else THEMES["Light"]["OPTION_MENU_FG"])
+        except Exception:
+            pass
     theme_menu.pack(anchor="w", padx=18, pady=(0, 12))
 
     # Main UI Scale slider
