@@ -27,6 +27,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",   # read/write sheets
     "https://www.googleapis.com/auth/drive",           # upload images, manage files
     "https://www.googleapis.com/auth/userinfo.email",  # show who is signed in
+    "openid",                                          # avoid OAuth scope mismatch errors
 ]
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,14 @@ def get_credentials():
             creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
         except Exception:
             creds = None
+
+    # If token exists but does not include all current scopes, force re-auth.
+    try:
+        if creds and getattr(creds, "scopes", None):
+            if not set(SCOPES).issubset(set(creds.scopes)):
+                creds = None
+    except Exception:
+        creds = None
 
     # 2. Refresh or re-authenticate
     if creds and creds.valid:

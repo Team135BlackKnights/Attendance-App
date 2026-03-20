@@ -4,15 +4,38 @@
   "whos_here_scale": 1.0,
   "camera_frequency": 1.0,
   "camera_trigger": "never",
+  "keyboardless_mode": false,
   "keyboardless_bindings": {
-    "sign_in": "0000000000000000",
-    "sign_out": "1111111111111111",
-    "internship": "2222222222222222",
-    "build_season": "3333333333333333",
-    "volunteering": "4444444444444444",
-    "next_option": "5555555555555555",
-    "prev_option": "6666666666666666",
-    "close_popup": "7777777777777777"
+    "sign_in": "",
+    "sign_out": "",
+    "internship": "",
+    "build_season": "",
+    "volunteering": "",
+    "close_popup": ""
   },
-  "easy_signin_mode": true
+  "easy_signin_mode": true,
+  "sheet_name": "Cool Sheet",
+  "data_logging": {
+    "fields": {
+      "name": true,
+      "timestamp": true,
+      "image_link": false,
+      "image_path": false,
+      "reason": true
+    },
+    "worksheet_targets": [
+      "Main Attendance",
+      "Comp 2",
+      "Build Season"
+    ],
+    "time_cutoffs": {
+      "late_signin": "15:45",
+      "early_signout": "18:45"
+    },
+    "cutoff_enabled_by_worksheet": {
+      "Main Attendance": false,
+      "Comp 2": false,
+      "Build Season": false
+    }
+  }
 }

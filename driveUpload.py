@@ -4,9 +4,53 @@ import os
 import threading
 import queue
 import time
+import random
 
 
 defaultDoc = ""
+
+DEFAULT_LOGGING_FIELDS = {
+    "name": True,
+    "timestamp": True,
+    "image_link": True,
+    "image_path": True,
+    "reason": True,
+}
+
+LOGGING_FIELD_ORDER = [
+    ("name", "Name"),
+    ("timestamp", "Timestamp"),
+    ("image_link", "Image Link"),
+    ("image_path", "Image Path"),
+    ("reason", "Reason"),
+]
+
+_api_call_count = 0
+_next_refresh_threshold = random.randint(8, 16)
+_api_refresh_callback = None
+
+
+def register_api_refresh_callback(callback):
+    """Register a callback that is queued every random 8-16 API calls."""
+    global _api_refresh_callback
+    _api_refresh_callback = callback
+
+
+def _mark_google_api_call():
+    """Track Google API usage and trigger queued local refresh periodically."""
+    global _api_call_count, _next_refresh_threshold
+    _api_call_count += 1
+    if _api_call_count < _next_refresh_threshold:
+        return
+
+    _api_call_count = 0
+    _next_refresh_threshold = random.randint(8, 16)
+
+    if callable(_api_refresh_callback):
+        try:
+            _api_refresh_callback()
+        except Exception:
+            pass
 
 
 def set_default_doc(name):
@@ -28,6 +72,7 @@ def setup_google_sheet(document=None):
         raise ValueError("No Google Sheet configured. Go to Options → Google Sheet Setup.")
     client = get_gspread_client()
     sheet = client.open(document)
+    _mark_google_api_call()
     return sheet
 
 # Authenticate Google Drive API (now uses OAuth via google_auth module)
@@ -37,8 +82,107 @@ def setup_google_drive():
 def list_sheets(document=None):
     spreadsheet = setup_google_sheet(document)
     worksheets = spreadsheet.worksheets()   # list of Worksheet objects
+    _mark_google_api_call()
     sheet_names = [ws.title for ws in worksheets]
     return sheet_names
+
+
+def create_worksheet_tab(name, document=None, rows=1000, cols=26):
+    """Create a worksheet tab in the configured spreadsheet.
+
+    Raises ValueError if the name is empty, reserved, or already exists.
+    """
+    title = (name or "").strip()
+    if not title:
+        raise ValueError("Worksheet name cannot be empty.")
+    if title == IDS_SHEET_NAME:
+        raise ValueError("The worksheet name 'IDs' is reserved.")
+
+    spreadsheet = setup_google_sheet(document)
+    existing = [ws.title for ws in spreadsheet.worksheets()]
+    if title in existing:
+        raise ValueError(f"A worksheet named '{title}' already exists.")
+
+    created = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+    _mark_google_api_call()
+    return created
+
+
+def _col_num_to_letter(col_num):
+    """Convert 1-based column index to A1-style column letters."""
+    letters = ""
+    n = int(col_num)
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def _normalize_logging_fields(logging_fields):
+    """Return a fully-populated logging field map with safe defaults."""
+    merged = DEFAULT_LOGGING_FIELDS.copy()
+    if isinstance(logging_fields, dict):
+        for key in merged.keys():
+            if key in logging_fields:
+                merged[key] = bool(logging_fields.get(key))
+    return merged
+
+
+def _build_attendance_headers_and_row(current_id, name, attendance_record, file_path, file_url, reason, logging_fields):
+    """Build dynamic headers and row values based on field toggles."""
+    fields = _normalize_logging_fields(logging_fields)
+
+    headers = ["ID"]
+    row = [current_id]
+
+    value_map = {
+        "name": name,
+        "timestamp": attendance_record,
+        "image_link": file_url,
+        "image_path": file_path,
+        "reason": reason,
+    }
+
+    for key, label in LOGGING_FIELD_ORDER:
+        if fields.get(key, False):
+            headers.append(label)
+            row.append(value_map.get(key))
+
+    return headers, row
+
+
+def _find_row_for_action(sheet, action):
+    """Return the next writable row for sign-in or sign-out block."""
+    first_col = "A" if action == "in" else "H"
+    values = sheet.get(f"{first_col}:{first_col}")
+    return len(values) + 1
+
+
+def _ensure_headers(sheet, action, headers):
+    """Ensure dynamic headers exist in row 1 for the target action block."""
+    start_col_num = 1 if action == "in" else 8
+    end_col_num = start_col_num + len(headers) - 1
+    start_col = _col_num_to_letter(start_col_num)
+    end_col = _col_num_to_letter(end_col_num)
+    header_range = f"{start_col}1:{end_col}1"
+
+    existing = sheet.get(header_range)
+    if not existing or existing[0] != headers:
+        sheet.update(range_name=header_range, values=[headers])
+
+
+def _write_dynamic_attendance_row(sheet, action, row_values, headers):
+    """Write one attendance row using dynamic columns with no disabled-field gaps."""
+    _ensure_headers(sheet, action, headers)
+
+    start_col_num = 1 if action == "in" else 8
+    end_col_num = start_col_num + len(row_values) - 1
+    row_num = _find_row_for_action(sheet, action)
+    start_col = _col_num_to_letter(start_col_num)
+    end_col = _col_num_to_letter(end_col_num)
+    target_range = f"{start_col}{row_num}:{end_col}{row_num}"
+    sheet.update(range_name=target_range, values=[row_values])
+    _mark_google_api_call()
 
 
 # Set file permissions to make it publicly accessible
@@ -51,6 +195,7 @@ def make_file_public(drive_service, file_id):
         fileId=file_id,
         body=permission
     ).execute()
+    _mark_google_api_call()
 
 # Upload an image and return its view link
 def upload_image_to_drive(drive_service, file_path):
@@ -66,6 +211,7 @@ def upload_image_to_drive(drive_service, file_path):
         media_body=media,
         fields='id, webViewLink, webContentLink'
     ).execute()
+    _mark_google_api_call()
 
     # Make the file public
     make_file_public(drive_service, file.get('id'))
@@ -108,6 +254,7 @@ def ensure_ids_sheet_exists(document=None):
     """
     spreadsheet = setup_google_sheet(document)
     worksheets = spreadsheet.worksheets()
+    _mark_google_api_call()
     sheet_names = [ws.title for ws in worksheets]
     
     if IDS_SHEET_NAME in sheet_names:
@@ -115,9 +262,12 @@ def ensure_ids_sheet_exists(document=None):
     else:
         # Create the IDs sheet
         ids_sheet = spreadsheet.add_worksheet(title=IDS_SHEET_NAME, rows=1000, cols=2)
+        _mark_google_api_call()
         # Add headers
         ids_sheet.update_acell('A1', 'Name')
         ids_sheet.update_acell('B1', 'ID')
+        _mark_google_api_call()
+        _mark_google_api_call()
         print(f"Created '{IDS_SHEET_NAME}' sheet with headers.")
         return ids_sheet
 
@@ -139,6 +289,7 @@ def load_ids_cache(document=None):
         
         # Fetch all data at once (more efficient than multiple cell lookups)
         all_values = ids_sheet.get_all_values()
+        _mark_google_api_call()
         
         # Clear existing caches
         id_to_name_cache.clear()
@@ -172,12 +323,15 @@ def _process_id_item(item, document):
     try:
         ids_sheet = ensure_ids_sheet_exists(document)
         id_column = ids_sheet.col_values(2)  # Column B (IDs)
+        _mark_google_api_call()
         if student_id_str in id_column[1:]:
             print(f"Background sync: ID {student_id_str} already exists in sheet, skipping")
         else:
             next_row = len(id_column) + 1
             ids_sheet.update_acell(f'A{next_row}', name)
             ids_sheet.update_acell(f'B{next_row}', student_id_str)
+            _mark_google_api_call()
+            _mark_google_api_call()
             print(f"Background sync: Added new entry: '{name}' with ID {student_id_str}")
         return True
     except Exception as e:
@@ -191,11 +345,21 @@ def _process_attendance_item(item, document):
     Pushes the attendance record (and optional image) to Google.
     Returns True on success, False to retry.
     """
-    current_id, name, attendance_record, event, reason, action, hasPic, img_folder, img_picName, volunteering_list = item
+    # Backward compatibility for older queue payloads.
+    if len(item) >= 11:
+        current_id, name, attendance_record, event, reason, action, hasPic, img_folder, img_picName, volunteering_list, logging_fields = item
+    else:
+        current_id, name, attendance_record, event, reason, action, hasPic, img_folder, img_picName, volunteering_list = item
+        logging_fields = DEFAULT_LOGGING_FIELDS.copy()
+
     print(f"Background sync: Pushing attendance for '{name}' ({action})")
     try:
         spreadsheet = setup_google_sheet(document)
         drive = setup_google_drive()
+
+        normalized_fields = _normalize_logging_fields(logging_fields)
+        if not (normalized_fields.get("image_link", True) or normalized_fields.get("image_path", True)):
+            hasPic = False
 
         if hasPic and img_folder and img_picName:
             file_path = f"{img_folder}/{img_picName}"
@@ -205,24 +369,35 @@ def _process_attendance_item(item, document):
             file_path = "No Image"
             file_url = "No Image"
 
-        # Determine target sheet
-        if (reason not in volunteering_list) and reason != "Build Season":
-            sheet = spreadsheet.worksheet("Main Attendance")
-        elif reason == "Build Season":
-            sheet = spreadsheet.worksheet("Build Season")
-        else:
-            sheet = spreadsheet.worksheet(reason)
+        # Determine target sheet.
+        # Prefer the sheet selected in the UI (`event`) when it exists.
+        sheet_names = [ws.title for ws in spreadsheet.worksheets()]
+        target_sheet = None
 
-        # Insert data into the correct columns
-        data = [current_id, name, attendance_record, file_path, file_url, reason]
-        if action == "in":
-            values = sheet.get("A:A")
-            row = len(values) + 1
-            sheet.update(f"A{row}:F{row}", [data])
-        else:
-            values = sheet.get("H:H")
-            row = len(values) + 1
-            sheet.update(f"H{row}:M{row}", [data])
+        if event and event in sheet_names and event != IDS_SHEET_NAME:
+            target_sheet = event
+        elif reason and reason in sheet_names and reason != IDS_SHEET_NAME:
+            target_sheet = reason
+        elif "Main Attendance" in sheet_names:
+            target_sheet = "Main Attendance"
+        elif sheet_names:
+            target_sheet = sheet_names[0]
+
+        if target_sheet is None:
+            raise ValueError("No writable worksheet found in spreadsheet.")
+
+        sheet = spreadsheet.worksheet(target_sheet)
+
+        headers, row_values = _build_attendance_headers_and_row(
+            current_id=current_id,
+            name=name,
+            attendance_record=attendance_record,
+            file_path=file_path,
+            file_url=file_url,
+            reason=reason,
+            logging_fields=normalized_fields,
+        )
+        _write_dynamic_attendance_row(sheet, action, row_values, headers)
 
         print(f"Background sync: Attendance pushed for '{name}'")
         return True
@@ -462,7 +637,27 @@ def fetch_whos_here_from_sheets(sheet_names, document=None):
             if len(all_values) <= 1:
                 continue  # only header row
 
+            header = all_values[0]
             rows = all_values[1:]  # skip header
+
+            def _find_header_idx(section_start, section_end, header_name):
+                for idx in range(section_start, min(section_end, len(header))):
+                    if str(header[idx]).strip().lower() == header_name.lower():
+                        return idx
+                return None
+
+            in_id_idx = _find_header_idx(0, 7, "ID")
+            in_name_idx = _find_header_idx(0, 7, "Name")
+            in_ts_idx = _find_header_idx(0, 7, "Timestamp")
+
+            out_id_idx = _find_header_idx(7, len(header), "ID")
+            out_name_idx = _find_header_idx(7, len(header), "Name")
+            out_ts_idx = _find_header_idx(7, len(header), "Timestamp")
+
+            # If timestamps are not being logged, this sheet cannot contribute
+            # reliable signed-in state.
+            if in_ts_idx is None:
+                continue
 
             # Build per-person latest sign-in and sign-out datetimes
             # sign_in:  col A(0)=ID, B(1)=Name, C(2)=Timestamp
@@ -472,20 +667,24 @@ def fetch_whos_here_from_sheets(sheet_names, document=None):
 
             for row in rows:
                 # --- sign-in side ---
-                if len(row) >= 3 and row[1] and row[2]:
-                    name_in = row[1]
-                    ts_in = parse_timestamp(row[2])
-                    if ts_in:
+                if in_ts_idx is not None and len(row) > in_ts_idx and row[in_ts_idx]:
+                    sign_in_name = row[in_name_idx] if in_name_idx is not None and len(row) > in_name_idx else ""
+                    sign_in_id = row[in_id_idx] if in_id_idx is not None and len(row) > in_id_idx else ""
+                    name_in = sign_in_name if sign_in_name else f"ID {sign_in_id}" if sign_in_id else ""
+                    ts_in = parse_timestamp(row[in_ts_idx])
+                    if name_in and ts_in:
                         if name_in not in person_last_in or ts_in > person_last_in[name_in][0]:
                             # Build a friendly timestamp string "HH:MM AM/PM, YYYY-MM-DD"
                             friendly = ts_in.strftime("%I:%M %p") + ", " + ts_in.strftime("%Y-%m-%d")
                             person_last_in[name_in] = (ts_in, friendly)
 
                 # --- sign-out side ---
-                if len(row) >= 10 and row[8] and row[9]:
-                    name_out = row[8]
-                    ts_out = parse_timestamp(row[9])
-                    if ts_out:
+                if out_ts_idx is not None and len(row) > out_ts_idx and row[out_ts_idx]:
+                    sign_out_name = row[out_name_idx] if out_name_idx is not None and len(row) > out_name_idx else ""
+                    sign_out_id = row[out_id_idx] if out_id_idx is not None and len(row) > out_id_idx else ""
+                    name_out = sign_out_name if sign_out_name else f"ID {sign_out_id}" if sign_out_id else ""
+                    ts_out = parse_timestamp(row[out_ts_idx])
+                    if name_out and ts_out:
                         if name_out not in person_last_out or ts_out > person_last_out[name_out]:
                             person_last_out[name_out] = ts_out
 
@@ -609,13 +808,13 @@ def create_attendance_spreadsheet(name):
                            "", "ID", "Name", "Timestamp", "Image Path", "Image URL", "Reason"]]
 
     main_ws = spreadsheet.add_worksheet(title="Main Attendance", rows=1000, cols=13)
-    main_ws.update("A1:M1", attendance_headers)
+    main_ws.update(range_name="A1:M1", values=attendance_headers)
 
     build_ws = spreadsheet.add_worksheet(title="Build Season", rows=1000, cols=13)
-    build_ws.update("A1:M1", attendance_headers)
+    build_ws.update(range_name="A1:M1", values=attendance_headers)
 
     ids_ws = spreadsheet.add_worksheet(title="IDs", rows=1000, cols=2)
-    ids_ws.update("A1:B1", [["Name", "ID"]])
+    ids_ws.update(range_name="A1:B1", values=[["Name", "ID"]])
 
     # Remove the default blank 'Sheet1'
     try:
