@@ -6,8 +6,23 @@ The embedded client ID identifies *this app* to Google; it does NOT grant
 access to anything — the user must still consent in the browser.
 
 Flow:
-  1. First run  → browser opens for consent → token saved to token.json
-  2. Later runs → token loaded from disk, auto-refreshed when expired
+  1. First run  → user clicks "Sign In with Google" in Options → browser opens
+                  for consent → token saved to token.json
+  2. Later runs → token loaded from disk and auto-refreshed when expired
+  3. Sign-out   → token.json is deleted; next sign-in requires browser consent
+
+Module-level constants:
+    SCOPES           -- OAuth 2.0 scopes requested from Google.
+    TOKEN_FILE       -- Absolute path to the persisted token JSON file.
+
+Public functions:
+    get_credentials  -- Return valid OAuth credentials, raising if not signed in.
+    get_gspread_client -- Return an authorised gspread Client.
+    get_drive_service  -- Return an authorised Google Drive v3 service object.
+    get_user_email   -- Return the e-mail of the currently signed-in user.
+    is_signed_in     -- Return True when a valid/refreshable token exists on disk.
+    sign_in          -- Run the browser OAuth flow and persist the resulting token.
+    sign_out         -- Delete the stored token, requiring a fresh sign-in next time.
 """
 
 import os
@@ -25,7 +40,7 @@ import gspread
 # ---------------------------------------------------------------------------
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",   # read/write sheets
-    "https://www.googleapis.com/auth/drive",           # upload images, manage files
+    "https://www.googleapis.com/auth/drive.file",      # upload/manage files created by this app
     "https://www.googleapis.com/auth/userinfo.email",  # show who is signed in
     "openid",                                          # avoid OAuth scope mismatch errors
 ]
@@ -46,9 +61,15 @@ _B64_CLIENT_ID = b"MTI2MTE3OTk4MDIxLTNmZWFhbWlrZzFjYjN0MGI3ZWcwZ2RzNjhsMTkzMTN2L
 _B64_CLIENT_SECRET = b"R09DU1BYLVpLQXAzUS1DQWFILURTekxmWk5lcHpKMHVZVVM="
 
 def _decode(b64_value: bytes) -> str:
+    """Decode a base64-encoded bytes value to a plain UTF-8 string."""
     return base64.b64decode(b64_value).decode("utf-8")
 
 def _build_client_config():
+    """Build the OAuth client config dict expected by InstalledAppFlow.
+
+    Decodes the embedded base64 client credentials at call time and returns
+    the structure that google-auth-oauthlib accepts as ``client_config``.
+    """
     return {
         "installed": {
             "client_id": _decode(_B64_CLIENT_ID),
@@ -113,22 +134,14 @@ def get_credentials():
             _save_token(creds)
             return creds
         except Exception:
-            # Refresh failed (e.g. revoked) – fall through to re-auth
+            # Refresh failed (e.g. revoked) – token is unusable
             creds = None
 
-    # 3. Full browser-based sign-in using the embedded client config
-    client_config = _build_client_config()
-    if client_config["installed"]["client_id"] == "YOUR_CLIENT_ID_HERE":
-        raise RuntimeError(
-            "OAuth client credentials have not been configured.\n"
-            "The app maintainer needs to fill in the _B64 values in google_auth.py.\n"
-            "See README.md for instructions."
-        )
-
-    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-    creds = flow.run_local_server(port=0)
-    _save_token(creds)
-    return creds
+    # 3. No valid credentials — do not open browser automatically.
+    #    The user must sign in explicitly via the Sign In button in Options.
+    raise RuntimeError(
+        "Not signed in to Google. Please open Options → Google Settings and click 'Sign In'."
+    )
 
 
 def _save_token(creds):
@@ -180,8 +193,30 @@ def is_signed_in():
         return False
 
 
+def sign_in():
+    """Start the OAuth browser flow and save the token.
+
+    Blocks until the user completes sign-in in their browser or closes the tab.
+    Must be called from a background thread — never from the main UI thread.
+    Raises an exception if the user cancels or an error occurs.
+    """
+    client_config = _build_client_config()
+    if client_config["installed"]["client_id"] == "YOUR_CLIENT_ID_HERE":
+        raise RuntimeError(
+            "OAuth client credentials have not been configured.\n"
+            "The app maintainer needs to fill in the _B64 values in google_auth.py."
+        )
+    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception as e:
+        raise RuntimeError(f"Sign-in was cancelled or failed: {e}") from e
+    _save_token(creds)
+    return creds
+
+
 def sign_out():
-    """Delete the stored token so the next run prompts a fresh sign-in."""
+    """Delete the stored token, requiring a fresh sign-in next time."""
     try:
         if os.path.exists(TOKEN_FILE):
             os.remove(TOKEN_FILE)

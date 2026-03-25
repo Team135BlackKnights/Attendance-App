@@ -1,3 +1,102 @@
+"""
+Main entry point and UI for the Attendance App.
+
+This module builds the Tkinter root window, handles the entire attendance
+flow, and wires together the Google Sheets/Drive back-end (driveUpload),
+camera capture (camera), and OAuth authentication (google_auth).
+
+Startup sequence:
+  1. Settings loaded from settings.json (load_settings).
+  2. Poppins font registered with the OS (load_private_font).
+  3. Root window and all main widgets created.
+  4. apply_ui_settings() applies the saved theme and font sizes.
+  5. root.after(200, _deferred_startup) fires once the event loop is running:
+       - If no sheet is configured, the sheet-setup dialog is shown.
+       - If not signed in, the yellow banner is displayed and the form is greyed out.
+       - Otherwise the sheet is verified in a background thread, then
+         initialize_google_connection() populates the ID cache, Who's Here
+         state, and starts background_sync_worker.
+
+Function groups
+---------------
+Font / theme helpers:
+    create_fonts            -- Create scaled Poppins font objects.
+    apply_ui_settings       -- Apply the active theme to all existing widgets.
+    style_entry             -- Apply consistent styling to an Entry widget.
+    style_optionmenu        -- Apply consistent styling to an OptionMenu widget.
+    center_window           -- Center a window on screen at a fixed size.
+    center_and_fit          -- Resize and center a window to fit its content.
+    adjust_all_toplevels_to_scale -- Resize all open Toplevel windows after a scale change.
+
+Settings:
+    save_settings           -- Persist all settings globals to settings.json.
+    load_settings           -- Load settings from settings.json into globals.
+
+Attendance flow:
+    scan_id                 -- Validate the ID entry and dispatch to name-lookup or smile window.
+    ask_name_window         -- Prompt a first-time user to enter their name.
+    open_smile_window       -- Show the "Smile!" popup and trigger camera capture.
+    display_smile_message   -- Render the smile prompt into a container widget.
+    take_picture_and_record -- Capture a photo then call process_attendance.
+    open_fail_window        -- Show the camera-failure dialog.
+    display_fail_message    -- Render the failure message into a container widget.
+    process_attendance      -- Record attendance locally and queue the Google push.
+    push_to_google          -- (Legacy) Directly push one record to Google Sheets/Drive.
+    next_available_row      -- Return the next empty row index in a sheet column range.
+    insert_data             -- Write sign-in or sign-out data into the appropriate columns.
+    early_sign_out          -- Prompt for and return an early sign-out reason string.
+    late_sign_in            -- Prompt for and return a late sign-in reason string.
+
+Sign-in tracking:
+    add_sign_in             -- Add or update a person in the local sign-ins dict.
+    remove_sign_in          -- Remove a person from the local sign-ins dict.
+    get_current_signins     -- Return a snapshot copy of the current sign-ins dict.
+
+Loading windows:
+    open_id_lookup_loading_window    -- Show a "looking up ID" progress dialog.
+    open_name_submit_loading_window  -- Show a "saving name" progress dialog.
+    open_loading_window              -- Show a generic "saving attendance" progress dialog.
+    display_loading_message          -- Render the loading text into a container widget.
+
+Who's Here window:
+    open_whos_here_window   -- Open (or lift) the scrollable Who's Here dialog.
+    refresh_whos_here_window -- Repopulate the Who's Here window if it is open.
+
+Options / Settings dialog:
+    open_options_window     -- Open the multi-section Options/Settings dialog.
+
+Keyboardless mode:
+    enter_keyboardless_mode -- Activate barcode-scanner input mode.
+    exit_keyboardless_mode  -- Deactivate barcode-scanner input mode.
+
+UI state management:
+    set_ui_auth_state       -- Show/hide the sign-in banner; enable/disable form.
+    set_ui_sheets_state     -- Enable/disable form based on whether sheets are loaded.
+    _set_dropdown_loading   -- Put the event dropdown into "Loading sheets…" state.
+    _apply_form_state       -- Apply the combined auth+sheets enabled state to all inputs.
+
+Google initialisation:
+    initialize_google_connection -- Load ID cache, Who's Here, and start background sync.
+    _deferred_startup       -- Post-mainloop startup: verify sheet, auth state, begin init.
+    on_closing              -- Clean up background threads before the window closes.
+
+Module-level variables of note:
+    sign_ins                -- dict: name → timestamp string of currently signed-in people.
+    volunteeringList        -- list of non-standard worksheet names shown in the event dropdown.
+    eventsList              -- list of worksheet names populating the event OptionMenu.
+    logging_field_toggles   -- dict controlling which attendance columns are written.
+    worksheet_targets       -- Ordered list of preferred attendance worksheet names.
+    late_signin_cutoff      -- HH:MM (24h) after which a sign-in is considered late.
+    early_signout_cutoff    -- HH:MM (24h) before which a sign-out is considered early.
+    camera_frequency        -- Probability (0.05–1.0) that a photo is taken per event.
+    camera_trigger          -- When camera fires: "in", "out", "both", or "never".
+    keyboardless_mode       -- True when barcode-scanner input mode is active.
+    easy_signin_mode        -- True when sign-in/out direction is auto-detected locally.
+    ui_theme                -- Active theme name: "Light", "Dark", or "Black & Gold".
+    main_ui_scale           -- Scale multiplier for the main window fonts (0.5–2.0).
+    whos_here_scale         -- Scale multiplier for the Who's Here window fonts (0.5–2.0).
+"""
+
 import os
 import sys
 from PIL import ImageFont
@@ -6,13 +105,12 @@ import tkinter as tk
 from tkinter import messagebox, Label, Entry, Button, Toplevel, Radiobutton, StringVar, OptionMenu, BooleanVar, Checkbutton
 from driveUpload import *
 from camera import takePic
-from google_auth import is_signed_in, get_user_email, sign_out
+from google_auth import is_signed_in, get_user_email, sign_out, sign_in
 from tkinter import font
 import time
 import threading
 import random
 import json
-import traceback
 
 # --- Begin: Embedding Poppins (runtime only) --------------------------------
 # Purpose: when packaged with PyInstaller, the font file will be extracted into
@@ -56,6 +154,7 @@ volunteeringList = []
 
 # Event sheet options used by the "Why are you here" dropdown.
 NO_ACTIVE_WORKSHEETS_LABEL = "(No Active Worksheets)"
+LOADING_SHEETS_LABEL = "Loading sheets\u2026"
 eventsList = [NO_ACTIVE_WORKSHEETS_LABEL]
 event_dropdown = None
 
@@ -158,6 +257,7 @@ def _refresh_event_dropdown(sheet_names):
     global eventsList
 
     choices = _attendance_sheets_from_list(sheet_names)
+    has_real_sheets = bool(choices)
     if not choices:
         choices = [NO_ACTIVE_WORKSHEETS_LABEL]
 
@@ -174,17 +274,23 @@ def _refresh_event_dropdown(sheet_names):
     except Exception:
         pass
 
+    # Enable form inputs only when real sheets are available
+    set_ui_sheets_state(has_real_sheets)
+
+
+_INACTIVE_LABELS = {NO_ACTIVE_WORKSHEETS_LABEL, LOADING_SHEETS_LABEL}
+
 
 def _has_active_worksheet_selection():
     """Return True when current selected event points at a real worksheet."""
     current = event_var.get()
-    return bool(current and current != NO_ACTIVE_WORKSHEETS_LABEL and current in eventsList)
+    return bool(current and current not in _INACTIVE_LABELS and current in eventsList)
 
 
 def _first_active_worksheet_name():
     """Return the first active worksheet option, or empty string when unavailable."""
     for sheet in eventsList:
-        if sheet and sheet != NO_ACTIVE_WORKSHEETS_LABEL and sheet != "IDs":
+        if sheet and sheet not in _INACTIVE_LABELS and sheet != "IDs":
             return sheet
     return ""
 
@@ -394,18 +500,27 @@ OPTION_MENU_FG = None
 # Geometry helpers
 # --------------------------
 
-# Center a window on the primary display using the given width/height.
 def center_window(window, width=500, height=400):
+    """Center ``window`` on the primary display at the given pixel dimensions."""
     screen_width = window.winfo_screenwidth()
     screen_height = window.winfo_screenheight()
     x = (screen_width // 2) - (width // 2)
     y = (screen_height // 2) - (height // 2)
     window.geometry(f"{width}x{height}+{x}+{y}")
 
-# Resize a window to comfortably hold `inner_widget` plus padding, clamped to screen size.
 def center_and_fit(window, inner_widget, pad_x=60, pad_y=60, max_width=None, max_height=None):
-    """
-    Resize window to fit inner_widget's requested size plus padding, then center.
+    """Resize ``window`` to fit ``inner_widget`` plus padding, then center it.
+
+    Clamps the final size to the screen minus 80 px on each side so the window
+    never exceeds the display.
+
+    Args:
+        window:       The Toplevel or Tk window to resize.
+        inner_widget: The widget whose requested dimensions drive the size.
+        pad_x:        Extra horizontal pixels to add around the inner widget.
+        pad_y:        Extra vertical pixels to add around the inner widget.
+        max_width:    Upper bound in pixels; defaults to screen width − 80.
+        max_height:   Upper bound in pixels; defaults to screen height − 80.
     """
     window.update_idletasks()
     req_w = inner_widget.winfo_reqwidth() + pad_x
@@ -455,8 +570,12 @@ tk_font_medium = None
 tk_font_smedium = None
 tk_font_small = None
 
-# Create and assign font sizes based on main_ui_scale.
 def create_fonts():
+    """Create and assign the four Poppins font sizes scaled by ``main_ui_scale``.
+
+    Replaces the four tk_font_* globals with new Font objects.  Must be called
+    after the Tk root exists and whenever ``main_ui_scale`` changes.
+    """
     global tk_font_large, tk_font_medium, tk_font_smedium, tk_font_small
     # Base sizes scaled by main_ui_scale (0.5 - 2.0)
     tk_font_large = font.Font(family="Poppins", size=int(48 * main_ui_scale))
@@ -468,9 +587,8 @@ def create_fonts():
 # Styling: entries & optionmenus helpers
 # --------------------------
 
-# Apply consistent visual styling to an OptionMenu and its dropdown menu.
 def style_optionmenu(optmenu):
-    """Style an OptionMenu widget and its underlying menu."""
+    """Apply theme colours and font to an OptionMenu and its dropdown menu."""
     try:
         optmenu.configure(
             font=tk_font_small,
@@ -485,15 +603,15 @@ def style_optionmenu(optmenu):
         )
         m = optmenu["menu"]
         # menu background/foreground and active colors
-        m.configure(bg=OPTION_MENU_BG, fg=OPTION_MENU_FG, activebackground=ACCENT_DARK, activeforeground=OPTION_MENU_FG, bd=0)
+        m.configure(bg=OPTION_MENU_BG, fg=OPTION_MENU_FG, activebackground=ACCENT_DARK, activeforeground=OPTION_MENU_FG, bd=0, font=tk_font_small)
     except Exception:
         pass
 
-# Enhance Entry widgets with an accent outline and consistent inner background/padding.
 def style_entry(entry):
-    """
-    Make entries more distinct: subtle accent outline + inner background and padding.
-    For dark mode the outline is thicker for stronger contrast.
+    """Apply theme colours and an accent outline to an Entry widget.
+
+    Uses a thicker highlight border in Dark and Black & Gold themes for
+    stronger contrast against the dark background.
     """
     try:
         thick = 3 if ui_theme in ("Dark", "Black & Gold") else 2
@@ -508,9 +626,14 @@ def style_entry(entry):
 # Apply theme and style existing widgets (UI-only)
 # --------------------------
 
-# Apply the currently chosen theme and tablet_mode to all existing widgets.
-# This function updates the color/global variables and restyles existing widgets recursively.
 def apply_ui_settings():
+    """Apply the active theme and font scale to all existing widgets.
+
+    Reads ``ui_theme`` and ``main_ui_scale`` globals, updates the colour
+    globals (BG_MAIN, ACCENT, …), recreates fonts via ``create_fonts``, then
+    walks the widget tree recursively to restyle every Frame, Label, Entry,
+    Button, OptionMenu, Radiobutton, and Checkbutton.
+    """
     global BG_MAIN, PANEL_BG, ACCENT, ACCENT_DARK, TEXT, POSITIVE, NEGATIVE, CARD_BORDER, BUTTON_ACTIVE, INPUT_BG, FOOTER_TEXT, OPTION_MENU_BG, OPTION_MENU_FG
     theme = THEMES.get(ui_theme, THEMES["Light"])
     BG_MAIN = theme["BG_MAIN"]
@@ -631,8 +754,8 @@ keyboardless_bindings = {
 # Easy sign in mode - automatically determines sign in/out based on last action
 easy_signin_mode = False
 
-# Google Sheet name (set by user in options)
-sheet_name = ""
+# Google Sheet ID (set by user in options)
+sheet_id = ""
 
 # Settings persistence
 DEFAULT_SETTINGS = {
@@ -651,7 +774,7 @@ DEFAULT_SETTINGS = {
         "close_popup": ""
     },
     "easy_signin_mode": False,
-    "sheet_name": "",
+    "sheet_id": "",
     "data_logging": {
         "fields": LOGGING_FIELD_DEFAULTS.copy(),
         "worksheet_targets": [],
@@ -666,6 +789,10 @@ DEFAULT_SETTINGS = {
 SETTINGS_FILE = os.path.join(_get_base_path(), "settings.json")
 
 def save_settings():
+    """Write all current settings globals to settings.json.
+
+    Silently ignores write errors so a read-only filesystem does not crash the app.
+    """
     data = {
         "ui_theme": ui_theme,
         "main_ui_scale": main_ui_scale,
@@ -675,7 +802,7 @@ def save_settings():
         "keyboardless_mode": keyboardless_mode,
         "keyboardless_bindings": keyboardless_bindings,
         "easy_signin_mode": easy_signin_mode,
-        "sheet_name": sheet_name,
+        "sheet_id": sheet_id,
         "data_logging": {
             "fields": logging_field_toggles,
             "worksheet_targets": worksheet_targets,
@@ -693,7 +820,13 @@ def save_settings():
         pass
 
 def load_settings():
-    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_mode, keyboardless_bindings, easy_signin_mode, sheet_name
+    """Read settings.json and populate all settings globals.
+
+    Falls back to DEFAULT_SETTINGS values for any missing or invalid key.
+    Also falls back entirely to defaults if the file is missing or cannot
+    be parsed, so the app always starts in a consistent state.
+    """
+    global ui_theme, main_ui_scale, whos_here_scale, camera_frequency, camera_trigger, keyboardless_mode, keyboardless_bindings, easy_signin_mode, sheet_id
     global logging_field_toggles, worksheet_targets, late_signin_cutoff, early_signout_cutoff, worksheet_cutoff_toggles
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -711,7 +844,7 @@ def load_settings():
                 for k in DEFAULT_SETTINGS["keyboardless_bindings"].keys()
             }
             easy_signin_mode = data.get("easy_signin_mode", DEFAULT_SETTINGS["easy_signin_mode"])
-            sheet_name = data.get("sheet_name", DEFAULT_SETTINGS["sheet_name"])
+            sheet_id = data.get("sheet_id", DEFAULT_SETTINGS["sheet_id"])
 
             loaded_data_logging = data.get("data_logging", {})
             loaded_fields = loaded_data_logging.get("fields", {}) if isinstance(loaded_data_logging, dict) else {}
@@ -748,7 +881,7 @@ def load_settings():
         keyboardless_mode = DEFAULT_SETTINGS["keyboardless_mode"]
         keyboardless_bindings = DEFAULT_SETTINGS["keyboardless_bindings"].copy()
         easy_signin_mode = DEFAULT_SETTINGS["easy_signin_mode"]
-        sheet_name = DEFAULT_SETTINGS["sheet_name"]
+        sheet_id = DEFAULT_SETTINGS["sheet_id"]
         logging_field_toggles = DEFAULT_SETTINGS["data_logging"]["fields"].copy()
         worksheet_targets = DEFAULT_SETTINGS["data_logging"]["worksheet_targets"].copy()
         late_signin_cutoff = DEFAULT_SETTINGS["data_logging"]["time_cutoffs"]["late_signin"]
@@ -787,8 +920,30 @@ def refresh_whos_here_window():
         pass
 
 
-# Validate the ID entry, fetch the name from DB, and either prompt for name or take picture+record attendance.
 def scan_id(event=None):
+    """Read and validate the ID entry, then route to name-entry or the smile/camera flow.
+
+    Guards:
+      - Blocks if not signed in to Google.
+      - Blocks if no Google Sheet is configured.
+      - Blocks if the event dropdown has no active worksheet selection.
+      - Validates that the entered value is a six-digit positive integer.
+
+    On success, performs an instant local cache lookup for the ID.  If the name
+    is not found and the name field is enabled, opens ``ask_name_window``.
+    Otherwise calls ``open_smile_window`` directly.
+
+    Args:
+        event: Optional Tkinter event (passed automatically when bound to a key).
+    """
+    # Guard: must be signed in before recording attendance
+    if not is_signed_in():
+        messagebox.showwarning(
+            "Not Signed In",
+            "Please sign in via Options \u2192 Google Settings before recording attendance."
+        )
+        return
+
     # Guard: ensure a sheet is configured before allowing attendance
     if not get_default_doc():
         messagebox.showwarning(
@@ -831,8 +986,16 @@ def scan_id(event=None):
     except Exception as e:
         messagebox.showerror("Error", f"Failed to lookup ID: {str(e)}")
 
-# Open a loading dialog while ID lookup is happening.
 def open_id_lookup_loading_window():
+    """Display a modal 'Looking up ID' progress dialog and return it.
+
+    The caller is responsible for destroying the returned window once the
+    lookup completes.  This dialog is no longer used in the main flow (ID
+    lookup is now an instant cache hit), but is kept for potential reuse.
+
+    Returns:
+        The Toplevel loading window.
+    """
     loading_window = Toplevel(root)
     loading_window.title("Loading...")
     center_window(loading_window, width=500, height=180)
@@ -860,8 +1023,16 @@ def open_id_lookup_loading_window():
     center_and_fit(loading_window, card, pad_x=80, pad_y=80)
     return loading_window
 
-# Prompt for a new user's first+last name and save it to the database.
 def ask_name_window(current_id):
+    """Show a dialog asking the user to type their first and last name.
+
+    Capitalises first and last tokens, saves the ID/name pair to the local
+    cache (and queues it for background sheet upload via save_id_name_pair),
+    then opens ``open_smile_window`` on success.
+
+    Args:
+        current_id: The six-digit integer ID that was scanned.
+    """
     new_window = Toplevel(root)
     new_window.title("Enter Name")
     center_window(new_window, width=460, height=260)
@@ -869,7 +1040,7 @@ def ask_name_window(current_id):
     new_window.focus_force()
 
     card = tk.Frame(new_window, bg=PANEL_BG, bd=1, relief="solid", highlightthickness=1)
-    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=420, height=200)
+    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=420, height=int(200 * main_ui_scale))
     try:
         card.configure(highlightbackground=CARD_BORDER)
     except Exception:
@@ -945,8 +1116,21 @@ def open_name_submit_loading_window():
     center_and_fit(loading_window, card, pad_x=80, pad_y=80)
     return loading_window
 
-# Show a "Smile!" confirmation card and then take a picture after a short delay.
 def open_smile_window(current_id, name):
+    """Show the 'Smile!' popup and schedule camera capture after 500 ms.
+
+    Checks camera_trigger and camera_frequency before showing the popup;
+    if the camera is disabled for the current action or the probabilistic
+    frequency check fails, skips the popup entirely and calls
+    ``process_attendance`` directly with ``hasPic=False``.
+
+    In easy_signin_mode the sign-in/out direction is determined from the
+    local sign_ins dict rather than the radiobutton selection.
+
+    Args:
+        current_id: The six-digit integer ID that was scanned.
+        name:       The student's display name (from cache or just entered).
+    """
     # Decide whether we will actually attempt to take a picture. If the camera
     # is disabled for this action or the probabilistic frequency check fails,
     # bypass the picture flow entirely and proceed to record attendance
@@ -998,8 +1182,8 @@ def open_smile_window(current_id, name):
     display_smile_message(card)
     smile_window.after(500, lambda: take_picture_and_record(smile_window, current_id, name))
 
-# Render the styled "Smile!" message inside a container (card or window).
 def display_smile_message(container):
+    """Clear ``container`` and render the 'Smile!' label in POSITIVE colour."""
     for widget in container.winfo_children():
         widget.destroy()
     smile_label = Label(
@@ -1011,8 +1195,19 @@ def display_smile_message(container):
     )
     smile_label.pack(expand=True, fill=tk.BOTH)
 
-# Take a picture using camera.takePic, then either proceed to process attendance or show failure UI.
 def take_picture_and_record(window, current_id, name):
+    """Capture a webcam photo, then call process_attendance or open the fail dialog.
+
+    Re-checks camera_trigger and camera_frequency in case the smile popup was
+    already showing when settings changed.  On a successful capture (takePic
+    returns None) calls ``process_attendance``; on failure opens
+    ``open_fail_window``.
+
+    Args:
+        window:     The smile Toplevel to destroy before proceeding.
+        current_id: The six-digit integer ID that was scanned.
+        name:       The student's display name.
+    """
     now = datetime.now()
     global folder
     folder = f"images/{current_id}-{name}"
@@ -1062,8 +1257,20 @@ def take_picture_and_record(window, current_id, name):
     else:
         open_fail_window(current_id, name)
 
-# Display camera failure dialog and allow approved override binding (binding kept, UI text removed).
 def open_fail_window(current_id, name):
+    """Show the camera-failure dialog.
+
+    Displays an error message and binds Ctrl+O as a hidden override that
+    allows proceeding without a photo (``process_attendance`` with
+    ``hasPic=False``).
+
+    Args:
+        current_id: The six-digit integer ID that was scanned.
+        name:       The student's display name.
+
+    Returns:
+        The Toplevel fail window.
+    """
     fail_window = Toplevel(root)
     fail_window.title("Camera Failure")
     center_window(fail_window, width=680, height=220)
@@ -1082,8 +1289,8 @@ def open_fail_window(current_id, name):
     center_and_fit(fail_window, card, pad_x=80, pad_y=80)
     return fail_window
 
-# Render the message shown on camera failure dialogs.
 def display_fail_message(container):
+    """Clear ``container`` and render the camera-failure error text in NEGATIVE colour."""
     for widget in container.winfo_children():
         widget.destroy()
     loading_label = Label(
@@ -1097,8 +1304,22 @@ def display_fail_message(container):
     )
     loading_label.pack(expand=True, fill=tk.BOTH, padx=12, pady=10)
 
-# Record attendance: update local tracking immediately, then queue background push to Google.
 def process_attendance(current_id, name, hasPic = True):
+    """Record an attendance event locally and queue it for background Google push.
+
+    Determines sign-in/out direction (easy_signin_mode or radiobutton),
+    checks cutoff times to decide whether an early-sign-out or late-sign-in
+    reason prompt is needed, updates the local sign_ins dict immediately,
+    places the full record onto ``attendance_queue`` for the background
+    worker, and shows a confirmation messagebox — all without waiting for
+    Google.
+
+    Args:
+        current_id: The six-digit integer ID that was scanned.
+        name:       The student's display name.
+        hasPic:     Whether a photo was successfully captured for this event.
+                    Ignored when both image fields are disabled in logging settings.
+    """
     now = datetime.now()
     formatted_time = now.strftime("%I:%M %p")
     formatted_date = now.strftime("%Y-%m-%d")
@@ -1190,8 +1411,15 @@ def process_attendance(current_id, name, hasPic = True):
     )
 
 
-# Open a loading dialog while background push is happening.
 def open_loading_window():
+    """Display a 'Saving attendance' progress dialog and return it.
+
+    The caller is responsible for destroying the returned window once the
+    background push has completed.
+
+    Returns:
+        The Toplevel loading window.
+    """
     loading_window = Toplevel(root)
     loading_window.title("Loading...")
     center_window(loading_window, width=500, height=180)
@@ -1209,8 +1437,8 @@ def open_loading_window():
     center_and_fit(loading_window, card, pad_x=80, pad_y=80)
     return loading_window
 
-# Render the text inside the loading dialog.
 def display_loading_message(container):
+    """Clear ``container`` and render the 'Saving attendance' text."""
     for widget in container.winfo_children():
         widget.destroy()
     loading_label = Label(
@@ -1224,8 +1452,25 @@ def display_loading_message(container):
     )
     loading_label.pack(expand=True, fill=tk.BOTH, padx=12, pady=12)
 
-# Background function: push attendance + image to Google Sheets + Drive.
 def push_to_google(current_id, name, attendance_record, event, reason, load, action, hasPic = True):
+    """Push a single attendance record directly to Google Sheets and Drive.
+
+    This is a legacy synchronous helper retained for completeness.  The
+    active code path queues records via ``attendance_queue`` and
+    ``background_sync_worker`` instead.  This function destroys ``load``
+    and shows a confirmation dialog in the main thread regardless of success
+    or failure.
+
+    Args:
+        current_id:        Six-digit student ID.
+        name:              Student display name.
+        attendance_record: Full timestamp string (e.g. "Signed in at: …").
+        event:             Selected worksheet name from the event dropdown.
+        reason:            Late/early reason string, or None.
+        load:              The loading Toplevel to destroy when done.
+        action:            ``"in"`` or ``"out"``.
+        hasPic:            Whether a photo was captured for this event.
+    """
     try:
         spreadsheet = setup_google_sheet()
         drive = setup_google_drive()
@@ -1250,13 +1495,27 @@ def push_to_google(current_id, name, attendance_record, event, reason, load, act
             f"Name: {name}\n{attendance_record}\nReason: {reason if reason else 'N/A'}"
         ))
 
-# Helper to find the next empty row in a sheet column range.
 def next_available_row(sheet, col_range):
+    """Return the 1-based index of the first empty row in ``col_range``.
+
+    Args:
+        sheet:     A gspread Worksheet object.
+        col_range: A1-notation column range string (e.g. ``"A:A"``).
+
+    Returns:
+        int: Row number of the first row after the last non-empty cell.
+    """
     values = sheet.get(col_range)
     return len(values) + 1
 
-# Insert sign-in/sign-out data into the appropriate columns on the sheet.
 def insert_data(sheet, action, data):
+    """Append ``data`` to the sign-in (A:F) or sign-out (H:M) block of ``sheet``.
+
+    Args:
+        sheet:  A gspread Worksheet object.
+        action: ``"in"`` to write columns A–F; ``"out"`` for columns H–M.
+        data:   A list of six values: [ID, Name, Timestamp, Image Path, Image URL, Reason].
+    """
     if(action == "in"):
         row = next_available_row(sheet, "A:A")
         sheet.update(range_name=f"A{row}:F{row}", values=[data])
@@ -1264,8 +1523,16 @@ def insert_data(sheet, action, data):
         row = next_available_row(sheet, "H:H")
         sheet.update(range_name=f"H{row}:M{row}", values=[data])
 
-# Ask user for a reason to early sign out; return the collected reason string.
 def early_sign_out():
+    """Show a modal dialog prompting the user to enter an early sign-out reason.
+
+    Blocks the calling flow via ``root.wait_window`` until the user submits or
+    closes the dialog.  In keyboardless mode the entry is kept continuously
+    focused and the close-popup binding dismisses without a reason.
+
+    Returns:
+        str: ``"Early sign out: <reason>"`` if submitted, or ``None`` if dismissed.
+    """
     reason_window = Toplevel(root)
     reason_window.title("Reason for Early Sign-Out")
     center_window(reason_window, width=460, height=220)
@@ -1273,7 +1540,7 @@ def early_sign_out():
     reason_window.focus_force()
 
     card = tk.Frame(reason_window, bg=PANEL_BG, bd=1, relief="solid")
-    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=420, height=180)
+    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=420, height=int(180 * main_ui_scale))
     try:
         card.configure(highlightbackground=CARD_BORDER)
     except Exception:
@@ -1327,8 +1594,14 @@ def early_sign_out():
         reason = "Early sign out: " + reason
     return reason
 
-# Ask user for a reason to late sign in; return the collected reason string.
 def late_sign_in():
+    """Show a modal dialog prompting the user to enter a late sign-in reason.
+
+    Mirrors ``early_sign_out`` in structure.  Blocks via ``root.wait_window``.
+
+    Returns:
+        str: ``"Late Sign In: <reason>"`` if submitted, or ``None`` if dismissed.
+    """
     reason_window = Toplevel(root)
     reason_window.title("Reason for Late Sign-In")
     center_window(reason_window, width=460, height=220)
@@ -1336,7 +1609,7 @@ def late_sign_in():
     reason_window.focus_force()
 
     card = tk.Frame(reason_window, bg=PANEL_BG, bd=1, relief="solid")
-    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=420, height=180)
+    card.place(relx=0.5, rely=0.5, anchor=tk.CENTER, width=420, height=int(180 * main_ui_scale))
     try:
         card.configure(highlightbackground=CARD_BORDER)
     except Exception:
@@ -1397,8 +1670,8 @@ root = tk.Tk()
 root.title("Attendance System")
 center_window(root, width=1000, height=720)
 
-action_var = StringVar(value="in")
-event_var = StringVar(value=NO_ACTIVE_WORKSHEETS_LABEL)
+action_var = StringVar(value="in")                              # Current radiobutton selection: "in" or "out"
+event_var = StringVar(value=NO_ACTIVE_WORKSHEETS_LABEL)         # Currently selected worksheet in the event dropdown
 
 root.attributes("-fullscreen", True)
 root.bind("<Escape>", lambda event: root.attributes("-fullscreen", False))
@@ -1412,9 +1685,9 @@ try:
 except Exception:
     pass
 
-# Apply saved sheet name to the driveUpload module
-if sheet_name:
-    set_default_doc(sheet_name)
+# Apply saved sheet ID to the driveUpload module
+if sheet_id:
+    set_default_doc(sheet_id)
 
 load_private_font(os.path.join("fonts", "Poppins-Regular.ttf"))
 create_fonts()
@@ -1435,6 +1708,20 @@ tracking_btn = tk.Button(header, text="Who's here?", command=lambda: open_whos_h
                         font=tk_font_small, bd=0, activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"])
 tracking_btn.pack(side="right", padx=16, pady=12)
 
+# Sign-in banner — shown when not signed in, hidden otherwise.
+# Height-0 trick keeps pack order stable so main_card position never shifts.
+signin_banner = tk.Frame(root, bg="#FFF3CD", height=0)
+signin_banner.pack(fill="x", padx=24)
+signin_banner.pack_propagate(False)
+signin_banner_label = Label(
+    signin_banner,
+    text="Not signed in  —  open Options \u2192 Google Settings to sign in. Attendance cannot be recorded.",
+    bg="#FFF3CD", fg="#856404",
+    font=None,  # resolved after create_fonts()
+    wraplength=800,
+    pady=9, padx=16,
+)
+signin_banner_label.pack()
 
 # Main panel
 main_card = tk.Frame(root, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
@@ -1513,9 +1800,80 @@ footer.pack(fill="x", padx=24, pady=(0, 18))
 footer_label = Label(footer, text="Tip: Press Esc to exit fullscreen.", font=tk_font_small, bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"], fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"])
 footer_label.pack(side="left", padx=6, pady=6)
 
-# --------------------------
-# "Who's Here" dialog: show currently signed-in people (freely resizable with scrollable list)
+
+_auth_ok = False       # True once the user has a valid Google OAuth token
+_sheets_ready = False  # True once at least one real worksheet has loaded into the dropdown
+
+
+def _apply_form_state():
+    """Enable form inputs only when both signed in and sheets are ready."""
+    enabled = _auth_ok and _sheets_ready
+    state = "normal" if enabled else "disabled"
+    id_entry.config(state=state)
+    enter_btn.config(state=state)
+    try:
+        event_dropdown.config(state=state)
+    except Exception:
+        pass
+    try:
+        radio_signin.config(state=state)
+        radio_signout.config(state=state)
+    except Exception:
+        pass
+
+
+def set_ui_auth_state(signed_in: bool):
+    """Show/hide the sign-in banner and update form state."""
+    global _auth_ok
+    _auth_ok = signed_in
+    if signed_in:
+        signin_banner.config(height=0)
+        signin_banner_label.pack_forget()
+    else:
+        try:
+            signin_banner_label.config(font=tk_font_small)
+        except Exception:
+            pass
+        signin_banner.config(height=36)
+        signin_banner_label.pack()
+    _apply_form_state()
+
+
+def set_ui_sheets_state(ready: bool):
+    """Enable or disable form inputs based on whether sheets have loaded."""
+    global _sheets_ready
+    _sheets_ready = ready
+    _apply_form_state()
+
+
+def _set_dropdown_loading():
+    """Put the event dropdown into a 'Loading sheets…' state and disable form inputs."""
+    global eventsList
+    eventsList = [LOADING_SHEETS_LABEL]
+    set_ui_sheets_state(False)
+    try:
+        if event_dropdown is not None:
+            menu = event_dropdown["menu"]
+            menu.delete(0, "end")
+            menu.add_command(label=LOADING_SHEETS_LABEL, command=tk._setit(event_var, LOADING_SHEETS_LABEL))
+        event_var.set(LOADING_SHEETS_LABEL)
+    except Exception:
+        pass
+
+
 def open_whos_here_window():
+    """Open (or raise) the resizable scrollable 'Who's Here?' dialog.
+
+    Shows all currently signed-in people from the local sign_ins dict,
+    sortable by name or sign-in time.  Automatically signs out anyone
+    who has been signed in for more than 12 hours and queues the
+    resulting sign-out records for background Google push.  Polls for
+    UI refresh every 60 seconds while open; supports a manual sheet
+    refresh button that re-fetches live data from Google.
+
+    If the window is already open, it is lifted to the front rather than
+    opened again.
+    """
     global whos_here_win, whos_here_after_id, whos_here_populate_func
 
     # If window already open, just lift it and return
@@ -2064,256 +2422,21 @@ def exit_keyboardless_mode():
     id_entry.unbind("<KeyRelease>")
 
 
-# --------------------------
-# Google Sheet Setup dialog
-# --------------------------
-def open_sheet_setup_window():
-    """Open a themed window to configure or create a Google Sheet."""
-    setup_win = Toplevel(root)
-    setup_win.title("Google Sheet Setup")
-    setup_win.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
-    setup_win.focus_force()
-    # Start larger so the sheet setup content fits on spawn
-    center_window(setup_win, width=1050, height=700)
-    setup_win.resizable(True, True)
-
-    # Outer card frame (holds the scrollable area)
-    card = tk.Frame(setup_win, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=1, relief="solid")
-    card.pack(fill="both", expand=True, padx=20, pady=20)
-    try:
-        card.configure(highlightbackground=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"])
-    except Exception:
-        pass
-
-    # Scrollable canvas + frame (so content can expand and be scrolled)
-    canvas = tk.Canvas(card, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"], bd=0, highlightthickness=0)
-    scrollbar = tk.Scrollbar(card, orient="vertical", command=canvas.yview)
-    scrollable_frame = tk.Frame(canvas, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
-
-    scrollable_frame.bind(
-        "<Configure>",
-        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    )
-
-    window_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-
-    canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
-    scrollbar.pack(side="right", fill="y", pady=10, padx=(0, 10))
-
-    # When the setup window is resized, ensure the embedded window width follows
-    resize_after_setup = None
-    def _on_setup_resize(event=None):
-        nonlocal resize_after_setup
-        try:
-            if resize_after_setup is not None:
-                root.after_cancel(resize_after_setup)
-        except Exception:
-            pass
-        def _do():
-            try:
-                canvas.itemconfig(window_id, width=canvas.winfo_width())
-                canvas.configure(scrollregion=canvas.bbox("all"))
-                # update wraplength-sensitive labels
-                try:
-                    wrap_len = max(200, canvas.winfo_width() - 40)
-                    if 'instruction_label' in locals():
-                        instruction_label.config(wraplength=wrap_len)
-                    if 'status_label' in locals():
-                        status_label.config(wraplength=wrap_len)
-                    if 'use_hint_label' in locals():
-                        use_hint_label.config(wraplength=wrap_len)
-                    if 'create_hint_label' in locals():
-                        create_hint_label.config(wraplength=wrap_len)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        resize_after_setup = root.after(120, _do)
-    setup_win.bind('<Configure>', _on_setup_resize)
-
-    # Title
-    tk.Label(scrollable_frame, text="Google Sheet Setup", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-             fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
-             font=tk_font_medium).pack(pady=(18, 4), padx=18)
-
-    instruction_label = tk.Label(scrollable_frame, text="Choose an existing Google Sheet from your Drive, or create a new one.",
-             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
-             font=tk_font_small, wraplength=560, justify="center")
-    instruction_label.pack(pady=(0, 14), padx=18)
-
-    # --- Section: Current sheet ---
-    current_frame = tk.Frame(scrollable_frame, bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"])
-    current_frame.pack(fill="x", padx=18, pady=(0, 8))
-
-    current_text = sheet_name if sheet_name else "(none)"
-    current_label = tk.Label(current_frame, text=f"Current sheet:  {current_text}",
-                             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-                             fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
-                             font=tk_font_small)
-    current_label.pack(anchor="w")
-
-    # Status label (shows success/error messages)
-    status_var = StringVar(value="")
-    status_label = tk.Label(scrollable_frame, textvariable=status_var,
-                            bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-                            fg=POSITIVE if POSITIVE else THEMES["Light"]["POSITIVE"],
-                            font=tk_font_small, wraplength=560)
-    status_label.pack(pady=(0, 6), padx=18)
-
-    # --- Section: Create new sheet (moved above Use existing) ---
-    sep_create = tk.Frame(scrollable_frame, bg=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"], height=1)
-    sep_create.pack(fill="x", padx=18, pady=(4, 10))
-
-    tk.Label(scrollable_frame, text="Create a new sheet", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-             fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18)
-
-    create_hint_label = tk.Label(scrollable_frame, text="This will create a new Google Sheet in your Drive with the right layout.",
-             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
-             font=tk_font_small, wraplength=560)
-    create_hint_label.pack(anchor="w", padx=18, pady=(0, 6))
-
-    new_name_entry = Entry(scrollable_frame, font=tk_font_small, bd=0, bg=INPUT_BG if INPUT_BG else THEMES["Light"]["INPUT_BG"], justify="center")
-    new_name_entry.pack(fill="x", padx=18, pady=(0, 6), ipady=8)
-    style_entry(new_name_entry)
-    new_name_entry.insert(0, "Attendance Sheet")
-
-    def create_new():
-        global sheet_name
-        name = new_name_entry.get().strip()
-        if not name:
-            status_var.set("Please enter a name for the new sheet.")
-            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"])
-            return
-
-        status_var.set("Creating sheet — this may take a moment...")
-        status_label.configure(fg=TEXT if TEXT else THEMES["Light"]["TEXT"]) 
-        setup_win.update_idletasks()
-
-        def _create():
-            try:
-                created_name = create_attendance_spreadsheet(name)
-                root.after(0, lambda: _on_create_success(created_name))
-            except Exception as e:
-                traceback.print_exc()
-                err = str(e)
-                root.after(0, lambda err=err: _on_create_fail(err))
-
-        def _on_create_success(created_name):
-            global sheet_name
-            sheet_name = created_name
-            set_default_doc(sheet_name)
-            save_settings()
-            try:
-                existing_entry.delete(0, tk.END)
-                existing_entry.insert(0, sheet_name)
-            except Exception:
-                pass
-            current_label.config(text=f"Current sheet:  {sheet_name}")
-            status_var.set(f"✓  Created \"{sheet_name}\" in your Google Drive!")
-            status_label.configure(fg=POSITIVE if POSITIVE else THEMES["Light"]["POSITIVE"]) 
-            threading.Thread(target=initialize_google_connection, daemon=True).start()
-            queue_local_sheet_refresh()
-
-        def _on_create_fail(err):
-            print(f"Failed to create sheet: {err}")
-            status_var.set(f"Failed to create sheet.\n{err}")
-            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"]) 
-
-        threading.Thread(target=_create, daemon=True).start()
-
-    create_btn = tk.Button(scrollable_frame, text="Create", command=create_new,
-                           bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white",
-                           font=tk_font_small, bd=0,
-                           activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
-                           padx=14, pady=8)
-    create_btn.pack(anchor="w", padx=18, pady=(0, 14))
-
-    # --- Section: Use existing sheet (moved below Create) ---
-    sep1 = tk.Frame(scrollable_frame, bg=CARD_BORDER if CARD_BORDER else THEMES["Light"]["CARD_BORDER"], height=1)
-    sep1.pack(fill="x", padx=18, pady=(4, 10))
-
-    tk.Label(scrollable_frame, text="Use an existing sheet", bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-             fg=TEXT if TEXT else THEMES["Light"]["TEXT"], font=tk_font_small).pack(anchor="w", padx=18)
-
-    use_hint_label = tk.Label(scrollable_frame, text="Type the exact name of a Google Sheet already in your Drive.",
-             bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-             fg=FOOTER_TEXT if FOOTER_TEXT else THEMES["Light"]["FOOTER_TEXT"],
-             font=tk_font_small, wraplength=560)
-    use_hint_label.pack(anchor="w", padx=18, pady=(0, 6))
-
-    existing_entry = Entry(scrollable_frame, font=tk_font_small, bd=0, bg=INPUT_BG if INPUT_BG else THEMES["Light"]["INPUT_BG"], justify="center")
-    existing_entry.pack(fill="x", padx=18, pady=(0, 6), ipady=8)
-    style_entry(existing_entry)
-    if sheet_name:
-        existing_entry.insert(0, sheet_name)
-
-    def use_existing():
-        global sheet_name
-        name = existing_entry.get().strip()
-        if not name:
-            status_var.set("Please enter a sheet name.")
-            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"])
-            return
-
-        status_var.set("Verifying...")
-        status_label.configure(fg=TEXT if TEXT else THEMES["Light"]["TEXT"]) 
-        setup_win.update_idletasks()
-
-        def _verify():
-            try:
-                set_default_doc(name)
-                # Try opening to verify it exists and is accessible
-                setup_google_sheet(name)
-                # Success
-                root.after(0, lambda: _on_verify_success(name))
-            except Exception as e:
-                traceback.print_exc()
-                err = str(e)
-                root.after(0, lambda err=err: _on_verify_fail(err))
-
-        def _on_verify_success(verified_name):
-            global sheet_name
-            sheet_name = verified_name
-            set_default_doc(sheet_name)
-            save_settings()
-            current_label.config(text=f"Current sheet:  {sheet_name}")
-            status_var.set(f"✓  Connected to \"{sheet_name}\" successfully!")
-            status_label.configure(fg=POSITIVE if POSITIVE else THEMES["Light"]["POSITIVE"]) 
-            # Initialize the connection in background
-            threading.Thread(target=initialize_google_connection, daemon=True).start()
-            queue_local_sheet_refresh()
-
-        def _on_verify_fail(err):
-            print(f"Could not open sheet: {err}")
-            status_var.set(f"Could not open that sheet. Make sure the name is exact.\n{err}")
-            status_label.configure(fg=NEGATIVE if NEGATIVE else THEMES["Light"]["NEGATIVE"]) 
-
-        threading.Thread(target=_verify, daemon=True).start()
-
-    use_btn = tk.Button(scrollable_frame, text="Connect", command=use_existing,
-                        bg=ACCENT if ACCENT else THEMES["Light"]["ACCENT"], fg="white",
-                        font=tk_font_small, bd=0,
-                        activebackground=ACCENT_DARK if ACCENT_DARK else THEMES["Light"]["ACCENT_DARK"],
-                        padx=14, pady=8)
-    use_btn.pack(anchor="w", padx=18, pady=(0, 10))
-
-    # Close button (outside scrollable area)
-    close_btn = tk.Button(card, text="Close", command=setup_win.destroy,
-                          bg=PANEL_BG if PANEL_BG else THEMES["Light"]["PANEL_BG"],
-                          fg=TEXT if TEXT else THEMES["Light"]["TEXT"],
-                          font=tk_font_small, bd=0, padx=12, pady=6)
-    close_btn.pack(side="bottom", pady=(0, 12))
 
 
-# --------------------------
-# Options dialog 
-# --------------------------
+def open_options_window(initial_section: str = "app_behavior"):
+    """Open the multi-section Options/Settings dialog.
 
-# Open the Options dialog with sidebar navigation and section content panels
-def open_options_window():
+    The dialog has a scrollable sidebar with four sections:
+      - App Behavior: theme, UI scale, camera frequency/trigger, Easy Sign In.
+      - Google Settings: sign-in/out, sheet create/connect.
+      - Data Logging: field toggles, cutoff times, worksheet targets.
+      - Keyboardless Mode: scanner binding configuration.
+
+    All changes are applied and persisted to settings.json only when the
+    user clicks "Apply".  "Reset Defaults" restores DEFAULT_SETTINGS values.
+    Mouse-wheel scroll is routed to whichever panel the pointer is over.
+    """
     opts = Toplevel(root)
     opts.title("Settings")
     opts.configure(bg=BG_MAIN if BG_MAIN else THEMES["Light"]["BG_MAIN"])
@@ -2511,7 +2634,8 @@ def open_options_window():
                 fg=option_fg,
                 activebackground=accent_dark,
                 activeforeground=option_fg,
-                bd=0
+                bd=0,
+                font=tk_font_small
             )
         except Exception:
             pass
@@ -2532,14 +2656,14 @@ def open_options_window():
 
     # App Behavior
     app_frame = sections["app_behavior"]
-    tk.Label(app_frame, text="App Behavior", bg=panel_bg, fg=text_color, font=tk_font_medium).pack(anchor="w", padx=18, pady=(14, 4))
+    tk.Label(app_frame, text="App Behavior", bg=panel_bg, fg=text_color, font=tk_font_medium, wraplength=900).pack(anchor="w", padx=18, pady=(14, 4))
 
     tk.Label(app_frame, text="Theme:", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(8, 4))
     theme_menu = OptionMenu(app_frame, theme_var_local, "Light", "Dark", "Black & Gold")
     _style_optionmenu_local(theme_menu)
     theme_menu.pack(anchor="w", padx=18, pady=(0, 12))
 
-    tk.Label(app_frame, text="Main UI Scale (0.5x - 2.0x):", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(6, 4))
+    tk.Label(app_frame, text="Main UI Scale (0.5x - 2.0x):", bg=panel_bg, fg=text_color, font=tk_font_small, wraplength=500).pack(anchor="w", padx=18, pady=(6, 4))
     main_scale_label = tk.Label(app_frame, text=f"{main_ui_scale:.2f}x", bg=panel_bg, fg=text_color, font=tk_font_small)
     main_scale_label.pack(anchor="w", padx=18)
 
@@ -2561,7 +2685,7 @@ def open_options_window():
     )
     main_scale_slider.pack(fill="x", padx=18, pady=(0, 10))
 
-    tk.Label(app_frame, text="Who's Here Scale (0.5x - 2.0x):", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(6, 4))
+    tk.Label(app_frame, text="Who's Here Scale (0.5x - 2.0x):", bg=panel_bg, fg=text_color, font=tk_font_small, wraplength=500).pack(anchor="w", padx=18, pady=(6, 4))
     whos_here_scale_label = tk.Label(app_frame, text=f"{whos_here_scale:.2f}x", bg=panel_bg, fg=text_color, font=tk_font_small)
     whos_here_scale_label.pack(anchor="w", padx=18)
 
@@ -2583,7 +2707,7 @@ def open_options_window():
     )
     whos_here_scale_slider.pack(fill="x", padx=18, pady=(0, 10))
 
-    tk.Label(app_frame, text="Camera Frequency (1/20 - 1.0):", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(6, 4))
+    tk.Label(app_frame, text="Camera Frequency (1/20 - 1.0):", bg=panel_bg, fg=text_color, font=tk_font_small, wraplength=500).pack(anchor="w", padx=18, pady=(6, 4))
     camera_freq_label = tk.Label(app_frame, text="", bg=panel_bg, fg=text_color, font=tk_font_small)
     camera_freq_label.pack(anchor="w", padx=18)
 
@@ -2643,7 +2767,7 @@ def open_options_window():
 
     # Google Settings
     google_frame = sections["google_settings"]
-    tk.Label(google_frame, text="Google Settings", bg=panel_bg, fg=text_color, font=tk_font_medium).pack(anchor="w", padx=18, pady=(14, 4))
+    tk.Label(google_frame, text="Google Settings", bg=panel_bg, fg=text_color, font=tk_font_medium, wraplength=900).pack(anchor="w", padx=18, pady=(14, 4))
 
     account_card = tk.Frame(google_frame, bg=panel_bg, bd=1, relief="solid")
     account_card.pack(fill="x", padx=18, pady=(8, 10))
@@ -2654,14 +2778,47 @@ def open_options_window():
     account_value_label.pack(anchor="w", padx=12, pady=(0, 8))
 
     def refresh_account_display():
+        """Update account label and show the correct Sign In / Sign Out button."""
         if is_signed_in():
-            email = get_user_email()
-            if email and email != "Unknown":
-                account_label_var.set(email)
-            else:
-                account_label_var.set("Signed in (email unavailable)")
+            sign_out_btn.pack(anchor="w", padx=12, pady=(0, 12))
+            sign_in_btn.pack_forget()
+            account_label_var.set("Loading…")
+            def _fetch():
+                email = get_user_email()
+                display = email if (email and email != "Unknown") else "Signed in (email unavailable)"
+                root.after(0, lambda: account_label_var.set(display))
+            threading.Thread(target=_fetch, daemon=True).start()
         else:
+            sign_in_btn.pack(anchor="w", padx=12, pady=(0, 12))
+            sign_out_btn.pack_forget()
             account_label_var.set("Not signed in")
+
+    def handle_sign_in():
+        sign_in_btn.config(state="disabled")
+        google_status_var.set("Opening browser for sign-in… Complete sign-in in your browser.")
+        google_status_label.configure(fg=text_color)
+
+        def _worker():
+            try:
+                sign_in()
+                root.after(0, _on_success)
+            except Exception as e:
+                root.after(0, lambda err=str(e): _on_fail(err))
+
+        def _on_success():
+            refresh_account_display()
+            google_status_var.set("Signed in successfully! Reconnecting to Google…")
+            google_status_label.configure(fg=positive)
+            sign_in_btn.config(state="normal")
+            set_ui_auth_state(True)
+            threading.Thread(target=initialize_google_connection, daemon=True).start()
+
+        def _on_fail(_err):
+            google_status_var.set("Sign-in was cancelled or failed. Try again.")
+            google_status_label.configure(fg=negative)
+            sign_in_btn.config(state="normal")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def handle_sign_out():
         try:
@@ -2669,12 +2826,26 @@ def open_options_window():
                 return
         except Exception:
             return
+        stop_background_sync()
         sign_out()
         refresh_account_display()
-        google_status_var.set("Signed out. Google access is disabled until you authenticate again.")
+        google_status_var.set("Signed out. Sign in again via the button above to restore access.")
         google_status_label.configure(fg=positive)
+        set_ui_auth_state(False)
 
-    tk.Button(
+    sign_in_btn = tk.Button(
+        account_card,
+        text="Sign In with Google",
+        command=handle_sign_in,
+        bg=accent,
+        fg="white",
+        font=tk_font_small,
+        bd=0,
+        activebackground=accent_dark,
+        padx=12,
+        pady=8,
+    )
+    sign_out_btn = tk.Button(
         account_card,
         text="Sign Out",
         command=handle_sign_out,
@@ -2684,10 +2855,12 @@ def open_options_window():
         bd=0,
         activebackground=accent_dark,
         padx=12,
-        pady=8
-    ).pack(anchor="w", padx=12, pady=(0, 12))
+        pady=8,
+    )
+    # Set initial button visibility
+    refresh_account_display()
 
-    current_sheet_var = StringVar(value=sheet_name if sheet_name else "(none)")
+    current_sheet_var = StringVar(value=sheet_id if sheet_id else "(none)")
     google_status_label = tk.Label(google_frame, textvariable=google_status_var, bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=920, justify="left")
 
     sheet_card = tk.Frame(google_frame, bg=panel_bg, bd=1, relief="solid")
@@ -2697,41 +2870,39 @@ def open_options_window():
     tk.Label(sheet_card, text="Sheets Config", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=12, pady=(10, 6))
     tk.Label(sheet_card, textvariable=current_sheet_var, bg=panel_bg, fg=footer_text, font=tk_font_small).pack(anchor="w", padx=12, pady=(0, 10))
 
-    create_sheet_card = tk.Frame(sheet_card, bg=panel_bg)
-    create_sheet_card.pack(fill="x", padx=12, pady=(0, 10))
-    tk.Label(create_sheet_card, text="Create a new sheet", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w")
-    tk.Label(create_sheet_card, text="This creates a new Google Sheet in your Drive with attendance layout.", bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=900, justify="left").pack(anchor="w", pady=(0, 6))
-    new_sheet_entry = Entry(create_sheet_card, font=tk_font_small, bd=0, bg=input_bg, justify="center")
-    new_sheet_entry.pack(fill="x", pady=(0, 6), ipady=8)
-    style_entry(new_sheet_entry)
-    new_sheet_entry.insert(0, "Attendance Sheet")
+    combined_sheet_card = tk.Frame(sheet_card, bg=panel_bg)
+    combined_sheet_card.pack(fill="x", padx=12, pady=(0, 12))
+    tk.Label(combined_sheet_card, text="Sheet ID", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w")
+    tk.Label(combined_sheet_card, text="Paste the Sheet ID to link an existing sheet, or enter a name to create a new one.", bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=560, justify="left").pack(anchor="w", pady=(0, 2))
+    tk.Label(combined_sheet_card, text="Find the Sheet ID in the URL:  docs.google.com/spreadsheets/d/  [SHEET-ID-HERE]  /edit", bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=560, justify="left").pack(anchor="w", pady=(0, 6))
+    combined_entry = Entry(combined_sheet_card, font=tk_font_small, bd=0, bg=input_bg, justify="center")
+    combined_entry.pack(fill="x", pady=(0, 6), ipady=8)
+    style_entry(combined_entry)
+    if sheet_id:
+        combined_entry.insert(0, sheet_id)
+    else:
+        combined_entry.insert(0, "Attendance Sheet")
 
-    existing_sheet_card = tk.Frame(sheet_card, bg=panel_bg)
-    existing_sheet_card.pack(fill="x", padx=12, pady=(0, 12))
-    tk.Label(existing_sheet_card, text="Use an existing sheet", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w")
-    tk.Label(existing_sheet_card, text="Enter the exact name of a Google Sheet that already exists in your Drive.", bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=900, justify="left").pack(anchor="w", pady=(0, 6))
-    existing_sheet_entry = Entry(existing_sheet_card, font=tk_font_small, bd=0, bg=input_bg, justify="center")
-    existing_sheet_entry.pack(fill="x", pady=(0, 6), ipady=8)
-    style_entry(existing_sheet_entry)
-    if sheet_name:
-        existing_sheet_entry.insert(0, sheet_name)
+    # Aliases so the handler functions below reference the same widget
+    new_sheet_entry = combined_entry
+    existing_sheet_entry = combined_entry
 
     def _set_google_status(msg, color):
         google_status_var.set(msg)
         google_status_label.configure(fg=color)
 
-    def _on_sheet_connected(connected_name, created=False):
-        global sheet_name
-        sheet_name = connected_name
-        set_default_doc(sheet_name)
+    def _on_sheet_connected(connected_id, created=False):
+        global sheet_id
+        sheet_id = connected_id
+        set_default_doc(sheet_id)
         save_settings()
-        current_sheet_var.set(f"Current sheet:  {sheet_name}")
+        current_sheet_var.set(f"Current sheet ID:  {sheet_id}")
         existing_sheet_entry.delete(0, tk.END)
-        existing_sheet_entry.insert(0, sheet_name)
+        existing_sheet_entry.insert(0, sheet_id)
         if created:
-            _set_google_status(f"Created '{sheet_name}' in Google Drive.", positive)
+            _set_google_status(f"Sheet created! ID: {sheet_id}", positive)
         else:
-            _set_google_status(f"Connected to '{sheet_name}' successfully.", positive)
+            _set_google_status(f"Connected successfully.", positive)
         threading.Thread(target=initialize_google_connection, daemon=True).start()
         queue_local_sheet_refresh()
 
@@ -2753,32 +2924,32 @@ def open_options_window():
         threading.Thread(target=_worker, daemon=True).start()
 
     def connect_existing_sheet_inline():
-        name = existing_sheet_entry.get().strip()
-        if not name:
-            _set_google_status("Please enter a sheet name.", negative)
+        entered_id = existing_sheet_entry.get().strip()
+        if not entered_id:
+            _set_google_status("Please enter a Sheet ID.", negative)
             return
 
         _set_google_status("Verifying access...", text_color)
 
         def _worker():
             try:
-                set_default_doc(name)
-                setup_google_sheet(name)
-                root.after(0, lambda: _on_sheet_connected(name, created=False))
+                set_default_doc(entered_id)
+                setup_google_sheet(entered_id)
+                root.after(0, lambda: _on_sheet_connected(entered_id, created=False))
             except Exception as e:
-                root.after(0, lambda err=str(e): _set_google_status(f"Could not open that sheet.\n{err}", negative))
+                root.after(0, lambda err=str(e): _set_google_status(f"Could not open that sheet. Check that the ID is correct.\n{err}", negative))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    google_btn_row = tk.Frame(sheet_card, bg=panel_bg)
-    google_btn_row.pack(fill="x", padx=12, pady=(0, 12))
-    tk.Button(google_btn_row, text="Connect", command=connect_existing_sheet_inline, bg=accent, fg="white", font=tk_font_small, bd=0, activebackground=accent_dark, padx=12, pady=8).pack(side="left")
-    tk.Button(google_btn_row, text="Create", command=create_new_sheet_inline, bg=accent, fg="white", font=tk_font_small, bd=0, activebackground=accent_dark, padx=12, pady=8).pack(side="left", padx=(8, 0))
+    google_btn_row = tk.Frame(combined_sheet_card, bg=panel_bg)
+    google_btn_row.pack(fill="x")
+    tk.Button(google_btn_row, text="Link Sheet", command=connect_existing_sheet_inline, bg=accent, fg="white", font=tk_font_small, bd=0, activebackground=accent_dark, padx=12, pady=8).pack(side="left")
+    tk.Button(google_btn_row, text="Create Sheet", command=create_new_sheet_inline, bg=accent, fg="white", font=tk_font_small, bd=0, activebackground=accent_dark, padx=12, pady=8).pack(side="left", padx=(8, 0))
     google_status_label.pack(anchor="w", padx=18, pady=(0, 10))
 
     # Data Logging
     data_frame = sections["data_logging"]
-    tk.Label(data_frame, text="Data Logging", bg=panel_bg, fg=text_color, font=tk_font_medium).pack(anchor="w", padx=18, pady=(14, 4))
+    tk.Label(data_frame, text="Data Logging", bg=panel_bg, fg=text_color, font=tk_font_medium, wraplength=900).pack(anchor="w", padx=18, pady=(14, 4))
     tk.Label(
         data_frame,
         text="Choose which fields are logged and how worksheet targets are prioritized in the main dropdown.",
@@ -2819,7 +2990,7 @@ def open_options_window():
         cb.pack(anchor="w", padx=10, pady=2)
         field_checkbuttons[key] = cb
 
-    tk.Label(data_frame, text="Main Attendance Cutoff Times (24h HH:MM)", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(8, 4))
+    tk.Label(data_frame, text="Main Attendance Cutoff Times (24h HH:MM)", bg=panel_bg, fg=text_color, font=tk_font_small, wraplength=500).pack(anchor="w", padx=18, pady=(8, 4))
     cutoff_card = tk.Frame(data_frame, bg=panel_bg, bd=1, relief="solid")
     cutoff_card.pack(fill="x", padx=18, pady=(0, 10))
     _style_card(cutoff_card)
@@ -2838,7 +3009,7 @@ def open_options_window():
     early_cutoff_entry.pack(side="right", padx=(8, 0), ipady=4)
     style_entry(early_cutoff_entry)
 
-    tk.Label(data_frame, text="Enable Cutoff Times By Worksheet", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(0, 4))
+    tk.Label(data_frame, text="Enable Cutoff Times By Worksheet", bg=panel_bg, fg=text_color, font=tk_font_small, wraplength=500).pack(anchor="w", padx=18, pady=(0, 4))
     cutoff_toggle_card = tk.Frame(data_frame, bg=panel_bg, bd=1, relief="solid")
     cutoff_toggle_card.pack(fill="x", padx=18, pady=(0, 10))
     _style_card(cutoff_toggle_card)
@@ -2854,11 +3025,11 @@ def open_options_window():
     cutoff_toggle_rows = tk.Frame(cutoff_toggle_card, bg=panel_bg)
     cutoff_toggle_rows.pack(fill="x", padx=8, pady=(0, 8))
 
-    tk.Label(data_frame, text="Worksheet Targets (ordered)", bg=panel_bg, fg=text_color, font=tk_font_small).pack(anchor="w", padx=18, pady=(8, 4))
+    tk.Label(data_frame, text="Worksheet Targets (ordered)", bg=panel_bg, fg=text_color, font=tk_font_small, wraplength=500).pack(anchor="w", padx=18, pady=(8, 4))
     ws_card = tk.Frame(data_frame, bg=panel_bg, bd=1, relief="solid")
     ws_card.pack(fill="x", padx=18, pady=(0, 8))
     _style_card(ws_card)
-    tk.Label(ws_card, text="First item is the default dropdown option.", bg=panel_bg, fg=footer_text, font=tk_font_small).pack(anchor="w", padx=10, pady=(8, 6))
+    tk.Label(ws_card, text="First item is the default dropdown option.", bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=500).pack(anchor="w", padx=10, pady=(8, 6))
 
     ws_rows_container = tk.Frame(ws_card, bg=panel_bg)
     ws_rows_container.pack(fill="x", padx=8, pady=(0, 8))
@@ -3051,7 +3222,7 @@ def open_options_window():
 
     # Keyboardless Mode
     keyboardless_frame = sections["keyboardless_mode"]
-    tk.Label(keyboardless_frame, text="Keyboardless Mode", bg=panel_bg, fg=text_color, font=tk_font_medium).pack(anchor="w", padx=18, pady=(14, 4))
+    tk.Label(keyboardless_frame, text="Keyboardless Mode", bg=panel_bg, fg=text_color, font=tk_font_medium, wraplength=900).pack(anchor="w", padx=18, pady=(14, 4))
     tk.Label(
         keyboardless_frame,
         text="Use scanner-friendly 16-character bindings for actions.",
@@ -3107,7 +3278,7 @@ def open_options_window():
         keyboardless_binding_labels.append(lbl)
         keyboardless_binding_entries[key] = entry
 
-    tk.Label(kb_card, text="Each binding must be unique and exactly 16 characters.", bg=panel_bg, fg=footer_text, font=tk_font_small).pack(anchor="w", padx=12, pady=(10, 12))
+    tk.Label(kb_card, text="Each binding must be unique and exactly 16 characters.", bg=panel_bg, fg=footer_text, font=tk_font_small, wraplength=500).pack(anchor="w", padx=12, pady=(10, 12))
 
     def update_keyboardless_controls_state(*args):
         enabled = bool(keyboardless_enabled_var.get())
@@ -3156,7 +3327,7 @@ def open_options_window():
     sidebar_buttons = {}
     current_section = {"name": "app_behavior"}
 
-    tk.Label(sidebar_inner, text="Settings", bg=panel_bg, fg=text_color, font=tk_font_medium).pack(anchor="w", padx=12, pady=(12, 10))
+    tk.Label(sidebar_inner, text="Settings", bg=panel_bg, fg=text_color, font=tk_font_medium, wraplength=230).pack(anchor="w", padx=12, pady=(12, 10))
 
     def show_section(name):
         current_section["name"] = name
@@ -3188,7 +3359,9 @@ def open_options_window():
             activebackground=accent_dark,
             anchor="w",
             padx=12,
-            pady=10
+            pady=10,
+            wraplength=210,
+            justify="left"
         )
         btn.pack(fill="x", padx=8, pady=2)
         sidebar_buttons[section_name] = btn
@@ -3375,8 +3548,8 @@ def open_options_window():
 
     # Default section and startup state
     refresh_account_display()
-    current_sheet_var.set(f"Current sheet:  {sheet_name if sheet_name else '(none)'}")
-    show_section("app_behavior")
+    current_sheet_var.set(f"Current sheet ID:  {sheet_id if sheet_id else '(none)'}")
+    show_section(initial_section)
 
     opts.protocol("WM_DELETE_WINDOW", close_options_window)
     opts.bind("<Return>", lambda e: apply_and_close())
@@ -3409,34 +3582,53 @@ root.protocol("WM_DELETE_WINDOW", on_closing)
 def _deferred_startup():
     """Run Google initialisation after the main loop starts.
 
-    If no sheet is configured yet, show the setup dialog so the user can
-    configure one before using the app.
+    Opens Settings on the Google section whenever setup is incomplete.
     """
-    if not sheet_name:
+    if not sheet_id:
         messagebox.showwarning(
             "Google Sheet Not Configured",
             "No Google Sheet has been set up yet.\n\n"
             "Please configure or create a Google Sheet so the app "
             "knows where to save attendance data."
         )
-        open_sheet_setup_window()
+        open_options_window("google_settings")
     else:
-        # Verify sheet exists/accessible on startup before background initialization.
-        try:
-            set_default_doc(sheet_name)
-            setup_google_sheet(sheet_name)
-        except Exception as e:
+        set_default_doc(sheet_id)
+
+        # If not signed in, warn and open Settings so the user can sign in.
+        if not is_signed_in():
+            set_ui_auth_state(False)
             messagebox.showwarning(
-                "Google Sheet Not Accessible",
-                "The configured Google Sheet could not be opened.\n\n"
-                f"{e}\n\n"
-                "Please configure or create a sheet."
+                "Google Sign-In Required",
+                "You are not signed in to Google.\n\n"
+                "Please sign in via Settings → Google Settings to enable attendance logging."
             )
-            open_sheet_setup_window()
+            open_options_window("google_settings")
             return
 
-        # Sheet is known — connect in the background so the UI stays responsive
-        threading.Thread(target=initialize_google_connection, daemon=True).start()
+        set_ui_auth_state(True)
+
+        # Put dropdown into loading state immediately — before the network call.
+        _set_dropdown_loading()
+
+        # Verify sheet is accessible before starting background sync.
+        # Runs in a thread so the UI stays responsive.
+        def _verify_and_init():
+            try:
+                setup_google_sheet(sheet_id)
+            except Exception as e:
+                root.after(0, lambda err=str(e): (
+                    messagebox.showwarning(
+                        "Google Sheet Not Accessible",
+                        "The configured Google Sheet could not be opened.\n\n"
+                        f"{err}\n\nPlease configure or create a sheet."
+                    ),
+                    open_options_window("google_settings"),
+                ))
+                return
+            initialize_google_connection()
+
+        threading.Thread(target=_verify_and_init, daemon=True).start()
 
 
 # Schedule the check for after the mainloop starts

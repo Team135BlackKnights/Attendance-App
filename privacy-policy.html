@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Attendance System</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      color: #1a1a1a;
+      background: #f9f9f9;
+    }
+
+    header {
+      background: #1a73e8;
+      color: #fff;
+      padding: 48px 24px 40px;
+      text-align: center;
+    }
+    header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; }
+    header p  { font-size: 0.95rem; opacity: 0.85; }
+
+    main {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+
+    section { margin-bottom: 40px; }
+
+    h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #1a73e8;
+      border-bottom: 2px solid #e8f0fe;
+      padding-bottom: 6px;
+      margin-bottom: 14px;
+    }
+
+    p { margin-bottom: 12px; }
+
+    ul, ol {
+      margin: 8px 0 12px 24px;
+    }
+    li { margin-bottom: 6px; }
+
+    .callout {
+      background: #e8f0fe;
+      border-left: 4px solid #1a73e8;
+      border-radius: 4px;
+      padding: 14px 18px;
+      margin: 16px 0;
+      font-size: 0.95rem;
+    }
+    .callout strong { color: #1a73e8; }
+
+    a { color: #1a73e8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      font-size: 0.85rem;
+      color: #666;
+      border-top: 1px solid #e0e0e0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Privacy Policy</h1>
+  <p>Attendance System &nbsp;·&nbsp; Last updated: <span id="date"></span></p>
+  <script>
+    document.getElementById("date").textContent =
+      new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  </script>
+</header>
+
+<main>
+
+  <section>
+    <h2>1. About This Application</h2>
+    <p>
+      Attendance System is a desktop application used by organizations (such as school clubs, sports teams,
+      or after-school programs) to record member attendance. Operators install and run the app on their own
+      device; it is not a hosted web service.
+    </p>
+    <p>
+      This policy explains what data the app collects, how it is used, and what rights individuals have
+      regarding that data. If you have questions, please contact the operator of the specific installation
+      you interact with.
+    </p>
+  </section>
+
+  <section>
+    <h2>2. Who This Policy Applies To</h2>
+    <p>This policy applies to two groups:</p>
+    <ul>
+      <li>
+        <strong>Operators</strong> — the person or organization that installs and runs the app and signs in
+        with their Google account to authorize access to Google Sheets and Google Drive.
+      </li>
+      <li>
+        <strong>Members / Attendees</strong> — individuals whose attendance is recorded by the operator
+        (e.g., students or club members). These individuals do not sign in with Google.
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>3. Data Collected</h2>
+
+    <h3 style="margin: 14px 0 6px; font-size: 1rem;">3a. Operator Google Account Data</h3>
+    <p>
+      When the operator signs in with Google, the app requests access to the following and stores the
+      resulting OAuth token locally on the operator's device:
+    </p>
+    <ul>
+      <li>Google account email address (used only to display who is currently signed in)</li>
+      <li>OAuth access and refresh tokens (stored in <code>token.json</code> on the local device)</li>
+    </ul>
+
+    <h3 style="margin: 14px 0 6px; font-size: 1rem;">3b. Attendance Records</h3>
+    <p>The app records the following data about members when they sign in or out:</p>
+    <ul>
+      <li>Member ID (a numeric identifier entered or scanned by the member)</li>
+      <li>Member name (entered by the member or looked up from an existing record)</li>
+      <li>Sign-in and sign-out timestamps</li>
+      <li>The reason or event associated with the visit (if provided)</li>
+      <li>
+        A photograph taken at the time of sign-in or sign-out (only if the operator has enabled the
+        camera feature — this is optional and off by default)
+      </li>
+    </ul>
+
+    <h3 style="margin: 14px 0 6px; font-size: 1rem;">3c. App Settings</h3>
+    <p>
+      User preferences (theme, camera settings, sheet configuration, etc.) are stored locally in a
+      <code>settings.json</code> file on the operator's device and are not transmitted anywhere.
+    </p>
+  </section>
+
+  <section>
+    <h2>4. How Data Is Used</h2>
+    <p>Data collected by the app is used exclusively for the following purposes:</p>
+    <ul>
+      <li>Recording attendance into a Google Spreadsheet designated by the operator</li>
+      <li>
+        Uploading member photos to the operator's Google Drive (only if the camera feature is enabled),
+        so that a link to the photo can be stored in the attendance spreadsheet
+      </li>
+      <li>Displaying a list of members currently signed in</li>
+      <li>Showing the operator's sign-in status within the app interface</li>
+    </ul>
+    <p>
+      Data is <strong>not</strong> used for advertising, analytics, profiling, or any purpose beyond
+      the direct operation of the attendance system.
+    </p>
+  </section>
+
+  <section>
+    <h2>5. Google API Services — Limited Use Disclosure</h2>
+    <div class="callout">
+      <strong>Required disclosure:</strong> Attendance System's use of information received from Google
+      APIs adheres to the
+      <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">
+        Google API Services User Data Policy
+      </a>, including the Limited Use requirements.
+    </div>
+    <p>Specifically:</p>
+    <ul>
+      <li>
+        Google user data is used only to provide and improve the attendance-tracking functionality
+        described in this policy.
+      </li>
+      <li>
+        Google user data is never transferred to third parties except as necessary to provide the
+        app's core features (i.e., writing to the operator's own Google Sheet and Drive).
+      </li>
+      <li>Google user data is never used for advertising purposes.</li>
+      <li>Google user data is never used to determine creditworthiness or for lending purposes.</li>
+      <li>
+        Humans do not read Google user data unless required for security purposes, to comply with
+        applicable law, or with the user's explicit permission.
+      </li>
+    </ul>
+
+    <h3 style="margin: 14px 0 6px; font-size: 1rem;">Scopes Requested</h3>
+    <p>The app requests the following Google OAuth scopes:</p>
+    <ul>
+      <li>
+        <code>spreadsheets</code> — to read and write attendance data to the operator's Google Sheet,
+        including creating worksheets and updating records.
+      </li>
+      <li>
+        <code>drive.file</code> — to upload photos taken during sign-in/out to the operator's Google
+        Drive and set sharing permissions so photo links can be stored in the spreadsheet.
+      </li>
+      <li>
+        <code>userinfo.email</code> — to display the operator's email address within the app so they
+        know which account is connected.
+      </li>
+      <li>
+        <code>openid</code> — required by the OAuth 2.0 flow to correctly identify the signed-in user.
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>6. Data Storage and Security</h2>
+    <ul>
+      <li>
+        <strong>Local storage:</strong> OAuth tokens (<code>token.json</code>) and app settings
+        (<code>settings.json</code>) are stored on the operator's local device. The app developer has
+        no access to these files.
+      </li>
+      <li>
+        <strong>Google services:</strong> Attendance records and photos are stored in the operator's
+        own Google Sheets and Google Drive. Access is controlled by the operator's Google account
+        permissions.
+      </li>
+      <li>
+        <strong>Local images:</strong> Photos captured by the app are temporarily saved in a local
+        <code>images/</code> folder on the operator's device before being uploaded. Operators are
+        responsible for managing or deleting these local copies.
+      </li>
+      <li>
+        <strong>No central server:</strong> The app developer does not operate any server that
+        receives, stores, or processes user data. All data flows directly between the operator's
+        device and their own Google account.
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>7. Data Sharing and Disclosure</h2>
+    <p>
+      The app does not share data with any third party. Data written to Google Sheets or Drive is
+      subject to <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google's
+      Privacy Policy</a>. The app developer has no access to any data stored in operator spreadsheets
+      or Drive folders.
+    </p>
+    <p>
+      Operators are solely responsible for how they share the Google Sheet or Drive folder containing
+      attendance data with other people (e.g., coaches, administrators).
+    </p>
+  </section>
+
+  <section>
+    <h2>8. Children's Privacy</h2>
+    <p>
+      This app is designed to be operated by an adult (the operator). Member/attendee data — such as
+      names, IDs, and photos — may belong to minors. No member data is ever transmitted to the app
+      developer. It is stored exclusively in the operator's own Google account.
+    </p>
+    <p>
+      Operators are responsible for obtaining any required consents from members (or their guardians)
+      before recording personal data such as photographs, in accordance with applicable laws (e.g.,
+      COPPA, FERPA, or local equivalents).
+    </p>
+  </section>
+
+  <section>
+    <h2>9. Data Retention and Deletion</h2>
+    <ul>
+      <li>
+        <strong>Operator token:</strong> The operator can sign out at any time from within the app.
+        This deletes the local <code>token.json</code> file and revokes the app's access to their
+        Google account.
+      </li>
+      <li>
+        <strong>Attendance records:</strong> Records stored in Google Sheets and Drive are under the
+        operator's full control. They can be edited or deleted at any time through Google's interfaces.
+      </li>
+      <li>
+        <strong>Local photos:</strong> Local image files can be deleted by the operator from their
+        device's file system at any time.
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>10. Your Rights</h2>
+    <p>
+      Depending on your location, you may have rights including access to, correction of, or deletion
+      of personal data. Because all data is stored in the operator's Google account and local device,
+      requests regarding member data should be directed to the operator of the specific installation.
+    </p>
+    <p>
+      To revoke the app's access to a Google account, visit
+      <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">
+        myaccount.google.com/permissions
+      </a>
+      and remove "Attendance System" from the list of connected apps.
+    </p>
+  </section>
+
+  <section>
+    <h2>11. Changes to This Policy</h2>
+    <p>
+      This policy may be updated from time to time. Material changes will be reflected by an updated
+      date at the top of this page. Continued use of the app after changes constitutes acceptance of
+      the revised policy.
+    </p>
+  </section>
+
+  <section>
+    <h2>12. Contact</h2>
+    <p>
+      For questions about this privacy policy, please open an issue on the project's GitHub repository
+      or contact the developer directly.
+    </p>
+    <!-- TODO: Replace with your actual contact email or GitHub URL -->
+  </section>
+
+</main>
+
+<footer>
+  <p>Attendance System &nbsp;·&nbsp; Privacy Policy &nbsp;·&nbsp; Open source desktop application</p>
+</footer>
+
+</body>
+</html>

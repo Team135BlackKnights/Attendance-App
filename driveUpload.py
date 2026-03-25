@@ -1,3 +1,52 @@
+"""
+Google Sheets and Drive integration for the Attendance App.
+
+Provides helpers for reading/writing the attendance spreadsheet, uploading
+photos to Google Drive, and maintaining an in-memory ID-to-name cache that
+is loaded from a dedicated "IDs" worksheet.  All attendance records and new
+ID/name pairs are written to Google in the background via daemon threads so
+the main UI thread is never blocked.
+
+Module-level variables:
+    defaultDoc                -- Name of the active Google Spreadsheet (set via set_default_doc).
+    DEFAULT_LOGGING_FIELDS    -- Default field-enable map used when none is specified.
+    LOGGING_FIELD_ORDER       -- Canonical ordering of attendance columns for dynamic headers.
+    _api_call_count           -- Rolling counter of Google API calls since last refresh trigger.
+    _next_refresh_threshold   -- Random threshold (8–16) at which a local refresh is queued.
+    _api_refresh_callback     -- Optional callable invoked periodically after API calls.
+    IDS_SHEET_NAME            -- Name of the worksheet that stores ID/name pairs ("IDs").
+    id_to_name_cache          -- In-memory dict mapping student ID strings to names.
+    name_to_id_cache          -- Reverse in-memory dict mapping names to ID strings.
+    new_id_queue              -- Thread-safe queue of (id, name) pairs pending sheet upload.
+    attendance_queue          -- Thread-safe queue of attendance record tuples pending upload.
+    background_sync_thread    -- The active daemon thread running background_sync_worker.
+    background_sync_running   -- Boolean flag that controls the background worker loop.
+
+Public functions:
+    register_api_refresh_callback   -- Register a callback fired every ~8–16 API calls.
+    set_default_doc                 -- Set the active spreadsheet name used by all helpers.
+    get_default_doc                 -- Return the current active spreadsheet name.
+    setup_google_sheet              -- Open and return the configured gspread Spreadsheet.
+    setup_google_drive              -- Return an authorised Drive v3 service object.
+    list_sheets                     -- Return all worksheet titles in the active spreadsheet.
+    create_worksheet_tab            -- Create a new worksheet tab in the active spreadsheet.
+    make_file_public                -- Grant public read access to a Drive file by ID.
+    upload_image_to_drive           -- Upload a local image to Drive and return its view URL.
+    ensure_ids_sheet_exists         -- Ensure the "IDs" worksheet exists, creating it if needed.
+    load_ids_cache                  -- Populate the in-memory ID caches from the "IDs" sheet.
+    get_name_by_id                  -- Instant cache lookup: student ID → name.
+    get_id_by_name                  -- Instant cache lookup: name → student ID.
+    save_id_name_pair               -- Write a new ID/name pair to the cache and queue it for sync.
+    parse_timestamp                 -- Parse a timestamp string into a datetime object.
+    fetch_whos_here_from_sheets     -- Scan attendance sheets to build a currently-signed-in dict.
+    get_last_action_from_sheet      -- Determine the most recent sign-in/out action for a student.
+    create_attendance_spreadsheet   -- Create a new spreadsheet with the standard tab layout.
+    list_user_spreadsheets          -- List all spreadsheet titles in the signed-in user's Drive.
+    start_background_sync           -- Start the background worker thread.
+    stop_background_sync            -- Signal the background worker to stop.
+    background_sync_worker          -- Worker function that drains both background queues.
+"""
+
 from googleapiclient.http import MediaFileUpload
 from google_auth import get_gspread_client, get_drive_service
 import os
@@ -7,9 +56,9 @@ import time
 import random
 
 
-defaultDoc = ""
+defaultDoc = ""  # Active spreadsheet ID; set via set_default_doc()
 
-DEFAULT_LOGGING_FIELDS = {
+DEFAULT_LOGGING_FIELDS = {  # Which attendance columns are written when no override is given
     "name": True,
     "timestamp": True,
     "image_link": True,
@@ -17,7 +66,7 @@ DEFAULT_LOGGING_FIELDS = {
     "reason": True,
 }
 
-LOGGING_FIELD_ORDER = [
+LOGGING_FIELD_ORDER = [  # Column order used when building dynamic sheet headers
     ("name", "Name"),
     ("timestamp", "Timestamp"),
     ("image_link", "Image Link"),
@@ -25,9 +74,9 @@ LOGGING_FIELD_ORDER = [
     ("reason", "Reason"),
 ]
 
-_api_call_count = 0
-_next_refresh_threshold = random.randint(8, 16)
-_api_refresh_callback = None
+_api_call_count = 0                          # Calls made since the last refresh trigger
+_next_refresh_threshold = random.randint(8, 16)  # Next count at which to fire the refresh callback
+_api_refresh_callback = None                 # Callable registered via register_api_refresh_callback
 
 
 def register_api_refresh_callback(callback):
@@ -64,22 +113,38 @@ def get_default_doc():
     return defaultDoc
 
 
-# Setup Google Sheets API (now uses OAuth via google_auth module)
 def setup_google_sheet(document=None):
+    """Open and return the configured gspread Spreadsheet object.
+
+    Args:
+        document: Spreadsheet name to open.  Defaults to ``defaultDoc`` when
+                  omitted.  Raises ValueError if neither is set.
+
+    Returns:
+        A ``gspread.Spreadsheet`` instance for the requested document.
+    """
     if document is None:
         document = defaultDoc
     if not document:
         raise ValueError("No Google Sheet configured. Go to Options → Google Sheet Setup.")
     client = get_gspread_client()
-    sheet = client.open(document)
+    sheet = client.open_by_key(document)
     _mark_google_api_call()
     return sheet
 
-# Authenticate Google Drive API (now uses OAuth via google_auth module)
 def setup_google_drive():
+    """Return an authorised Google Drive v3 service object via OAuth."""
     return get_drive_service()
 
 def list_sheets(document=None):
+    """Return a list of all worksheet titles in the active spreadsheet.
+
+    Args:
+        document: Spreadsheet name to query.  Defaults to ``defaultDoc``.
+
+    Returns:
+        list[str]: Worksheet titles in the order they appear in the spreadsheet.
+    """
     spreadsheet = setup_google_sheet(document)
     worksheets = spreadsheet.worksheets()   # list of Worksheet objects
     _mark_google_api_call()
@@ -185,8 +250,17 @@ def _write_dynamic_attendance_row(sheet, action, row_values, headers):
     _mark_google_api_call()
 
 
-# Set file permissions to make it publicly accessible
 def make_file_public(drive_service, file_id):
+    """Grant public read access to a Google Drive file.
+
+    Creates an "anyone with the link can view" permission on the file so
+    the resulting view URL can be stored in the attendance sheet without
+    requiring recipients to have a Google account.
+
+    Args:
+        drive_service: An authorised Drive v3 service object.
+        file_id:       The Drive file ID to make public.
+    """
     permission = {
         'role': 'reader',
         'type': 'anyone'
@@ -197,8 +271,20 @@ def make_file_public(drive_service, file_id):
     ).execute()
     _mark_google_api_call()
 
-# Upload an image and return its view link
 def upload_image_to_drive(drive_service, file_path):
+    """Upload a local image to Google Drive and return its public view URL.
+
+    Uploads the file, immediately grants public read access via
+    ``make_file_public``, then returns the ``webViewLink`` so it can be
+    stored in the attendance spreadsheet.
+
+    Args:
+        drive_service: An authorised Drive v3 service object.
+        file_path:     Absolute or relative path to the JPEG image on disk.
+
+    Returns:
+        str: The ``webViewLink`` URL of the uploaded file.
+    """
     file_name = os.path.basename(file_path)
     file_metadata = {
         'name': file_name,
@@ -225,7 +311,7 @@ def upload_image_to_drive(drive_service, file_path):
 # --------------------------
 # IDs Sheet Functions
 # --------------------------
-IDS_SHEET_NAME = "IDs"
+IDS_SHEET_NAME = "IDs"  # Reserved worksheet name that stores Name/ID pairs; never used as an attendance tab
 
 # --------------------------
 # Local ID Cache
@@ -796,7 +882,7 @@ def create_attendance_spreadsheet(name):
         name: Title for the new spreadsheet.
 
     Returns:
-        str: The title of the newly created spreadsheet.
+        str: The ID of the newly created spreadsheet.
 
     Raises:
         Exception on API errors.
@@ -823,7 +909,7 @@ def create_attendance_spreadsheet(name):
     except Exception:
         pass
 
-    return spreadsheet.title
+    return spreadsheet.id
 
 
 def list_user_spreadsheets():
