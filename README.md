@@ -12,6 +12,8 @@
 - Easy Sign In mode auto-detects sign-in vs. sign-out from local state.
 - Packagable as a single executable with PyInstaller.
 
+- Privacy policy at [this link](https://team135blackknights.github.io/Attendance-App/privacy-policy.html)
+
 ---
 
 ## Quick Start
