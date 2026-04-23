@@ -16,7 +16,21 @@
 
 ---
 
-## Quick Start
+## Quick Start (Executable)
+
+If you downloaded a pre-built `.exe`:
+
+1. Place the `.exe` in its own folder — `settings.json` and `token.json` will be written next to it.
+2. Double-click the `.exe` to launch.
+3. The app opens in full-screen. The main form is greyed out and a **yellow banner** is shown until you sign in.
+4. Open **Options → Google Settings** and click **"Sign In with Google"**. Your browser will open for OAuth consent. Complete the sign-in there.
+5. The banner disappears, the form becomes active, and the dropdown populates with your spreadsheet's worksheet names.
+
+> **Note:** On first launch Windows may show a SmartScreen warning ("Windows protected your PC"). Click **More info → Run anyway** — this appears because the executable is not yet widely distributed.
+
+---
+
+## Quick Start (From Source)
 
 1. Install dependencies (first time only):
    ```

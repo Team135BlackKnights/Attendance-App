@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Attendance App</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      color: #1a1a1a;
+      background: #f9f9f9;
+    }
+
+    header {
+      background: #1a73e8;
+      color: #fff;
+      padding: 56px 24px 48px;
+      text-align: center;
+    }
+    header h1 { font-size: 2.4rem; font-weight: 700; margin-bottom: 10px; }
+    header p  { font-size: 1rem; opacity: 0.9; max-width: 600px; margin: 0 auto 24px; }
+
+    .header-links { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-block;
+      padding: 10px 22px;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; text-decoration: none; }
+    .btn-primary { background: #fff; color: #1a73e8; }
+    .btn-outline { background: transparent; color: #fff; border: 2px solid rgba(255,255,255,0.7); }
+
+    nav {
+      background: #fff;
+      border-bottom: 1px solid #e0e0e0;
+      padding: 0 24px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    nav ul {
+      max-width: 900px;
+      margin: 0 auto;
+      list-style: none;
+      display: flex;
+      gap: 0;
+      overflow-x: auto;
+    }
+    nav ul li a {
+      display: block;
+      padding: 14px 16px;
+      color: #444;
+      text-decoration: none;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      border-bottom: 3px solid transparent;
+    }
+    nav ul li a:hover { color: #1a73e8; border-bottom-color: #1a73e8; }
+
+    main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+
+    section { margin-bottom: 48px; }
+
+    h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: #1a73e8;
+      border-bottom: 2px solid #e8f0fe;
+      padding-bottom: 8px;
+      margin-bottom: 18px;
+    }
+
+    h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin: 20px 0 8px;
+      color: #222;
+    }
+
+    p { margin-bottom: 12px; }
+
+    ul, ol {
+      margin: 8px 0 14px 24px;
+    }
+    li { margin-bottom: 6px; }
+
+    /* Feature grid */
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .feature-card {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 18px 20px;
+    }
+    .feature-card h3 { margin-top: 0; font-size: 0.95rem; color: #1a73e8; }
+    .feature-card p { font-size: 0.9rem; margin-bottom: 0; color: #444; }
+
+    /* Steps */
+    .steps { list-style: none; margin-left: 0; counter-reset: step; }
+    .steps li {
+      counter-increment: step;
+      display: flex;
+      gap: 14px;
+      margin-bottom: 14px;
+      align-items: flex-start;
+    }
+    .steps li::before {
+      content: counter(step);
+      min-width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #1a73e8;
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    /* Callout */
+    .callout {
+      background: #e8f0fe;
+      border-left: 4px solid #1a73e8;
+      border-radius: 4px;
+      padding: 14px 18px;
+      margin: 16px 0;
+      font-size: 0.95rem;
+    }
+    .callout strong { color: #1a73e8; }
+
+    .callout-warn {
+      background: #fff8e1;
+      border-left-color: #f9a825;
+    }
+    .callout-warn strong { color: #f57f17; }
+
+    /* Table */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 0.9rem;
+    }
+    th {
+      background: #e8f0fe;
+      color: #1a73e8;
+      font-weight: 700;
+      text-align: left;
+      padding: 10px 14px;
+    }
+    td { padding: 9px 14px; border-bottom: 1px solid #e0e0e0; }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:nth-child(even) td { background: #fafafa; }
+
+    /* Code */
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.875em;
+      background: #f1f3f4;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    pre {
+      background: #f1f3f4;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      padding: 16px 18px;
+      overflow-x: auto;
+      margin: 12px 0;
+    }
+    pre code { background: none; padding: 0; font-size: 0.9em; }
+
+    /* File tree */
+    .file-tree {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.875rem;
+      background: #f1f3f4;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      padding: 16px 18px;
+      line-height: 1.8;
+    }
+
+    a { color: #1a73e8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      font-size: 0.85rem;
+      color: #666;
+      border-top: 1px solid #e0e0e0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Attendance App</h1>
+  <p>A desktop application for easy attendance tracking with Google Sheets integration.</p>
+  <div class="header-links">
+    <a class="btn btn-primary" href="https://github.com/Team135BlackKnights/Attendance-App/releases" target="_blank" rel="noopener">Download</a>
+    <a class="btn btn-outline" href="https://github.com/Team135BlackKnights/Attendance-App" target="_blank" rel="noopener">View on GitHub</a>
+    <a class="btn btn-outline" href="privacy-policy.html">Privacy Policy</a>
+  </div>
+</header>
+
+<nav>
+  <ul>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#quickstart-exe">Quick Start (Exe)</a></li>
+    <li><a href="#quickstart-source">Quick Start (Source)</a></li>
+    <li><a href="#setup">First-Time Setup</a></li>
+    <li><a href="#daily-use">Daily Use</a></li>
+    <li><a href="#settings">Settings</a></li>
+    <li><a href="#developers">For Developers</a></li>
+  </ul>
+</nav>
+
+<main>
+
+  <!-- Features -->
+  <section id="features">
+    <h2>Features</h2>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <h3>Sign In &amp; Sign Out</h3>
+        <p>Track attendance with a 6-digit ID — typed or scanned with a barcode scanner.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Google Sheets Sync</h3>
+        <p>Records export to a Google Sheet in the signed-in user's Drive, non-blocking in the background.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Optional Webcam Photos</h3>
+        <p>Takes a webcam photo at each sign-in or sign-out to deter fraud. Frequency and trigger are configurable.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Late / Early Prompts</h3>
+        <p>Prompts for a reason when signing out early or signing in late, with per-worksheet cutoff times.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Easy Sign In Mode</h3>
+        <p>Auto-detects sign-in vs. sign-out from local state — no radio buttons needed.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Keyboardless Mode</h3>
+        <p>Designed for barcode-scanner stations — configure 16-character barcodes for each action.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Who's Here</h3>
+        <p>Live scrollable list of everyone currently signed in, with sign-in time. Sortable and auto-refreshing.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Themes &amp; Scaling</h3>
+        <p>Light, Dark, and Black &amp; Gold themes with scalable fonts for any display size.</p>
+      </div>
+      <div class="feature-card">
+        <h3>Packaged as Exe</h3>
+        <p>Distributable as a single <code>.exe</code> file built with PyInstaller — no Python install required.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start: Exe -->
+  <section id="quickstart-exe">
+    <h2>Quick Start (Executable)</h2>
+    <p>If you downloaded a pre-built <code>.exe</code>:</p>
+    <ol class="steps">
+      <li>Place the <code>.exe</code> in its own folder — <code>settings.json</code> and <code>token.json</code> will be written next to it.</li>
+      <li>Double-click the <code>.exe</code> to launch.</li>
+      <li>The app opens in full-screen. The main form is greyed out and a <strong>yellow banner</strong> is shown until you sign in.</li>
+      <li>Open <strong>Options → Google Settings</strong> and click <strong>"Sign In with Google"</strong>. Your browser will open for OAuth consent. Complete the sign-in there.</li>
+      <li>The banner disappears, the form becomes active, and the dropdown populates with your spreadsheet's worksheet names.</li>
+    </ol>
+    <div class="callout callout-warn">
+      <strong>Windows SmartScreen:</strong> On first launch Windows may show a "Windows protected your PC" warning because the executable is not yet widely distributed. Click <strong>More info → Run anyway</strong> to proceed.
+    </div>
+  </section>
+
+  <!-- Quick Start: Source -->
+  <section id="quickstart-source">
+    <h2>Quick Start (From Source)</h2>
+    <ol class="steps">
+      <li>Install dependencies (first time only):
+        <pre><code>python dependencies.py</code></pre>
+      </li>
+      <li>Run the app:
+        <pre><code>python main.py</code></pre>
+      </li>
+      <li>The app opens in full-screen. The main form is greyed out and a <strong>yellow banner</strong> is shown until you sign in.</li>
+      <li>Open <strong>Options → Google Settings</strong> and click <strong>"Sign In with Google"</strong>. Your browser will open for OAuth consent. Complete the sign-in there.</li>
+      <li>The banner disappears, the form becomes active, and the dropdown populates with your spreadsheet's worksheet names.</li>
+    </ol>
+    <h3>Requirements</h3>
+    <ul>
+      <li>Python 3.8+</li>
+      <li>Dependencies: <code>google-api-python-client</code>, <code>google-auth-oauthlib</code>, <code>gspread</code>, <code>opencv-python</code>, <code>Pillow</code></li>
+    </ul>
+  </section>
+
+  <!-- First-Time Setup -->
+  <section id="setup">
+    <h2>First-Time Setup</h2>
+
+    <h3>Sign In with Google</h3>
+    <ul>
+      <li>Open <strong>Options → Google Settings</strong>.</li>
+      <li>Click <strong>"Sign In with Google"</strong> — your browser opens for a one-time consent flow.</li>
+      <li>The token is saved to <code>token.json</code> in the app folder. Subsequent launches load it automatically; a browser is only opened again if the token expires or is revoked.</li>
+    </ul>
+
+    <h3>Connect a Google Sheet</h3>
+    <p>The app must know which spreadsheet to write to. In <strong>Options → Google Settings → Sheets Config</strong>:</p>
+    <ul>
+      <li><strong>Create a new sheet</strong> — enter a name and click <strong>Create</strong>. The app creates a spreadsheet in your Drive with the standard tab layout (Main Attendance, Build Season, IDs).</li>
+      <li><strong>Use an existing sheet</strong> — enter the exact spreadsheet title and click <strong>Connect</strong>. The sheet must already exist in your signed-in account's Drive.</li>
+    </ul>
+    <p>The selected sheet name is saved to <code>settings.json</code> and reused on subsequent launches.</p>
+
+    <h3>Sign In / Sign Out of Google</h3>
+    <table>
+      <thead><tr><th>Action</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>Sign in</td><td>Options → Google Settings → "Sign In with Google"</td></tr>
+        <tr><td>Sign out</td><td>Options → Google Settings → "Sign Out"</td></tr>
+      </tbody>
+    </table>
+    <p>Signing out deletes <code>token.json</code>. The yellow banner reappears and the form is greyed out until you sign in again.</p>
+  </section>
+
+  <!-- Daily Use -->
+  <section id="daily-use">
+    <h2>Daily Use</h2>
+    <ol class="steps">
+      <li>Launch the app. If previously signed in, the form activates automatically after sheets load (the dropdown briefly shows "Loading sheets…").</li>
+      <li>Select the <strong>worksheet</strong> from the "Why are you here" dropdown (e.g. "Main Attendance", "Build Season").</li>
+      <li>Select <strong>Sign In</strong> or <strong>Sign Out</strong> (hidden in Easy Sign In mode — direction is auto-detected).</li>
+      <li>Type or scan a <strong>6-digit ID</strong> into the entry field and press <strong>Enter</strong> (or click <strong>Enter</strong>).</li>
+      <li>If the ID is new, the app prompts for a first and last name.</li>
+      <li>A "Smile!" popup appears while the webcam captures a photo (if the camera is enabled).</li>
+      <li>A confirmation dialog appears immediately — no waiting for Google.</li>
+    </ol>
+    <p>Records are queued and pushed to Google Sheets/Drive in the background. The app remains fully usable while the push is in progress.</p>
+
+    <h3>Easy Sign In Mode</h3>
+    <p>When enabled (<strong>Options → App Behavior</strong>), the Sign In / Sign Out radio buttons are hidden. The app automatically determines direction from its local state: if the person is currently listed as signed in, the next scan signs them out, and vice versa.</p>
+
+    <h3>Keyboardless Mode</h3>
+    <p>Designed for barcode-scanner stations where no keyboard is attached. Configure 16-character scanner barcodes for each action (sign in, sign out, select worksheet, close popup). Enable via <strong>Options → Keyboardless Mode</strong> or activate directly after configuring bindings. Press <strong>Ctrl+E</strong> to exit keyboardless mode.</p>
+
+    <h3>Who's Here</h3>
+    <p>Click <strong>"Who's here?"</strong> in the header to open a scrollable, resizable list of everyone currently signed in, with their sign-in time. Sortable by name or time. Refreshes every 60 seconds; the <strong>Refresh</strong> button re-scans Google Sheets live.</p>
+    <p>People signed in for more than 12 hours are automatically signed out (recorded as "Didn't sign out") and removed from the list.</p>
+
+    <h3>Camera Settings</h3>
+    <table>
+      <thead><tr><th>Setting</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td>Camera Frequency</td><td>Probability a photo is taken per event (0.05 = 1-in-20, 1.0 = always)</td></tr>
+        <tr><td>Camera Trigger</td><td>Fire on Sign In, Sign Out, Both, or Never</td></tr>
+      </tbody>
+    </table>
+    <p>Setting the trigger to <strong>Never</strong> automatically disables the Image Link and Image Path logging fields.</p>
+
+    <h3>Late Sign-In / Early Sign-Out Prompts</h3>
+    <p>If cutoff times are configured (<strong>Options → Data Logging</strong>) and enabled for a worksheet, the app prompts for a reason when:</p>
+    <ul>
+      <li>A <strong>sign-in</strong> occurs after the late sign-in cutoff time (24h HH:MM).</li>
+      <li>A <strong>sign-out</strong> occurs before the early sign-out cutoff time (24h HH:MM).</li>
+    </ul>
+    <p>The reason is stored in the Reason column of the attendance sheet.</p>
+  </section>
+
+  <!-- Sheet Structure -->
+  <section id="sheet-structure">
+    <h2>Sheet Structure</h2>
+    <p>Every attendance spreadsheet created by the app has this layout:</p>
+
+    <h3>Attendance worksheets (e.g. "Main Attendance", "Build Season")</h3>
+    <table>
+      <thead><tr><th>Columns A–F</th><th>—</th><th>Columns H–M</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Sign-in block</td>
+          <td><em>(gap)</em></td>
+          <td>Sign-out block</td>
+        </tr>
+        <tr>
+          <td>ID, Name, Timestamp, Image Path, Image Link, Reason</td>
+          <td></td>
+          <td>ID, Name, Timestamp, Image Path, Image Link, Reason</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Headers are written dynamically based on which fields are enabled in Data Logging settings.</p>
+
+    <h3>IDs worksheet</h3>
+    <table>
+      <thead><tr><th>Column A</th><th>Column B</th></tr></thead>
+      <tbody>
+        <tr><td>Name</td><td>ID</td></tr>
+      </tbody>
+    </table>
+    <p>The "IDs" tab is reserved and cannot be used as an attendance target. It is populated automatically as new users register.</p>
+  </section>
+
+  <!-- Settings -->
+  <section id="settings">
+    <h2>Settings Reference</h2>
+    <p>Settings are stored in <code>settings.json</code> next to the executable (or script). All settings are editable via <strong>Options</strong>.</p>
+    <table>
+      <thead><tr><th>Key</th><th>Description</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>ui_theme</code></td><td>Color theme: <code>"Light"</code>, <code>"Dark"</code>, <code>"Black &amp; Gold"</code></td><td><code>"Light"</code></td></tr>
+        <tr><td><code>main_ui_scale</code></td><td>Font scale for the main window (0.5–2.0)</td><td><code>1.0</code></td></tr>
+        <tr><td><code>whos_here_scale</code></td><td>Font scale for the Who's Here window (0.5–2.0)</td><td><code>1.0</code></td></tr>
+        <tr><td><code>camera_frequency</code></td><td>Probability a photo is taken (0.05–1.0)</td><td><code>1.0</code></td></tr>
+        <tr><td><code>camera_trigger</code></td><td>When camera fires: <code>"in"</code>, <code>"out"</code>, <code>"both"</code>, <code>"never"</code></td><td><code>"both"</code></td></tr>
+        <tr><td><code>easy_signin_mode</code></td><td>Auto-detect sign-in vs. sign-out from local state</td><td><code>false</code></td></tr>
+        <tr><td><code>keyboardless_mode</code></td><td>Enable barcode-scanner input mode</td><td><code>false</code></td></tr>
+        <tr><td><code>keyboardless_bindings</code></td><td>16-char scanner strings for each action</td><td><code>{}</code></td></tr>
+        <tr><td><code>sheet_name</code></td><td>Google Spreadsheet title to write attendance to</td><td><code>""</code></td></tr>
+        <tr><td><code>data_logging.fields</code></td><td>Toggle each column: name, timestamp, image_link, image_path, reason</td><td>all <code>true</code></td></tr>
+        <tr><td><code>data_logging.worksheet_targets</code></td><td>Ordered list of attendance worksheet names for the dropdown</td><td><code>[]</code></td></tr>
+        <tr><td><code>data_logging.time_cutoffs.late_signin</code></td><td>HH:MM after which sign-in is considered late</td><td><code>"15:45"</code></td></tr>
+        <tr><td><code>data_logging.time_cutoffs.early_signout</code></td><td>HH:MM before which sign-out is considered early</td><td><code>"18:45"</code></td></tr>
+        <tr><td><code>data_logging.cutoff_enabled_by_worksheet</code></td><td>Per-worksheet enable flag for cutoff prompts</td><td><code>{}</code></td></tr>
+      </tbody>
+    </table>
+    <p>To reset all settings to defaults, open <strong>Options → Reset Defaults</strong>.</p>
+  </section>
+
+  <!-- For Developers -->
+  <section id="developers">
+    <h2>For Developers</h2>
+
+    <h3>Project Structure</h3>
+    <div class="file-tree">
+main.py          — Tkinter UI, attendance flow, settings, all top-level logic<br>
+driveUpload.py   — Google Sheets/Drive helpers, ID cache, background sync worker<br>
+google_auth.py   — OAuth 2.0 sign-in/out, credential storage<br>
+camera.py        — Webcam capture and gamma correction<br>
+dependencies.py  — pip install helper<br>
+fonts/           — Bundled Poppins font files<br>
+images/          — Written at runtime; one folder per student (ID-Name/)<br>
+settings.json    — Persisted user settings (written at runtime)<br>
+token.json       — Persisted OAuth token (written after first sign-in)
+    </div>
+
+    <h3>Background Sync</h3>
+    <p>Attendance records and new ID/name pairs are never written to Google synchronously. They are placed on <code>attendance_queue</code> and <code>new_id_queue</code> respectively. <code>background_sync_worker</code> (a daemon thread) drains both queues, retrying failed items after a 5-second back-off.</p>
+    <p>A periodic callback (<code>register_api_refresh_callback</code>) triggers a local refresh of the ID cache and Who's Here state every 8–16 Google API calls.</p>
+
+    <h3>PyInstaller Packaging</h3>
+    <p>The app supports <code>--onefile</code> packaging. <code>_get_base_path()</code> resolves <code>sys._MEIPASS</code> when frozen so bundled resources (fonts) are found correctly. <code>token.json</code> and <code>settings.json</code> are written next to the <code>.exe</code> (via <code>_get_persistent_path()</code>) so they survive re-extraction on each launch.</p>
+
+    <h3>OAuth Credentials</h3>
+    <p>The embedded OAuth client credentials (<code>_B64_CLIENT_ID</code>, <code>_B64_CLIENT_SECRET</code> in <code>google_auth.py</code>) are base64-encoded to avoid secret-scanning false positives. For desktop/installed apps Google explicitly documents that the client secret is not truly secret. Actual security comes from the user consenting in their browser.</p>
+    <p>To use your own Google Cloud project, replace the <code>_B64_*</code> values with your own base64-encoded client ID and secret from the Google Cloud Console (OAuth 2.0 → Desktop application type).</p>
+
+    <div class="callout">
+      <strong>Contributing:</strong> Pull requests and issues are welcome on <a href="https://github.com/Team135BlackKnights/Attendance-App" target="_blank" rel="noopener">GitHub</a>.
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>
+    Attendance App &nbsp;·&nbsp;
+    <a href="https://github.com/Team135BlackKnights/Attendance-App" target="_blank" rel="noopener">GitHub</a> &nbsp;·&nbsp;
+    <a href="privacy-policy.html">Privacy Policy</a> &nbsp;·&nbsp;
+    Open source desktop application
+  </p>
+</footer>
+
+</body>
+</html>
